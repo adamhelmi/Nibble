@@ -1,0 +1,123 @@
+[
+  {
+    "key": "milk",
+    "aliases": ["whole milk", "2% milk", "cow milk", "dairy milk"],
+    "subs": [
+      { "name": "oat milk", "notes": "Neutral, good for cooking", "tags": ["vegan", "dairy-free"] },
+      { "name": "soy milk", "notes": "Higher protein", "tags": ["vegan", "dairy-free", "soy"] },
+      { "name": "almond milk", "notes": "Light, slightly nutty", "tags": ["vegan", "dairy-free", "nut"] },
+      { "name": "evaporated milk", "notes": "Not dairy-free; richer", "tags": ["dairy"] }
+    ]
+  },
+  {
+    "key": "butter",
+    "aliases": ["unsalted butter", "salted butter"],
+    "subs": [
+      { "name": "olive oil", "notes": "Use ~75% of butter amount", "tags": ["vegan", "dairy-free"] },
+      { "name": "coconut oil", "notes": "Solid at room temp; pastry friendly", "tags": ["vegan", "dairy-free"] },
+      { "name": "vegan butter", "notes": "1:1 in most baking", "tags": ["vegan", "dairy-free"] },
+      { "name": "ghee", "notes": "Clarified; not dairy-free", "tags": ["dairy"] }
+    ]
+  },
+  {
+    "key": "egg",
+    "aliases": ["eggs", "large egg"],
+    "subs": [
+      { "name": "flax egg", "notes": "1 tbsp ground flax + 3 tbsp water", "tags": ["vegan", "dairy-free"] },
+      { "name": "chia egg", "notes": "1 tbsp chia + 3 tbsp water", "tags": ["vegan", "dairy-free"] },
+      { "name": "unsweetened applesauce", "notes": "1/4 cup per egg (baking)", "tags": ["vegan", "dairy-free"] },
+      { "name": "silken tofu", "notes": "1/4 cup per egg (custards)", "tags": ["vegan", "dairy-free", "soy"] }
+    ]
+  },
+  {
+    "key": "flour",
+    "aliases": ["all-purpose flour", "ap flour", "plain flour"],
+    "subs": [
+      { "name": "whole wheat flour", "notes": "Denser; use 75–80%", "tags": ["gluten"] },
+      { "name": "rice flour", "notes": "GF base for blends", "tags": ["gluten-free"] },
+      { "name": "oat flour", "notes": "Mild; check certified GF", "tags": ["gluten-free"] },
+      { "name": "almond flour", "notes": "Use with binders", "tags": ["gluten-free", "nut"] }
+    ]
+  },
+  {
+    "key": "soy sauce",
+    "aliases": ["shoyu"],
+    "subs": [
+      { "name": "tamari", "notes": "Usually gluten-free", "tags": ["soy", "gluten-free"] },
+      { "name": "coconut aminos", "notes": "Soy-free, sweeter", "tags": ["soy-free", "gluten-free"] }
+    ]
+  },
+  {
+    "key": "chicken broth",
+    "aliases": ["chicken stock"],
+    "subs": [
+      { "name": "vegetable broth", "notes": "Vegan", "tags": ["vegan"] },
+      { "name": "water + bouillon", "notes": "Season to taste", "tags": [] }
+    ]
+  },
+  {
+    "key": "ground beef",
+    "aliases": ["minced beef", "beef mince", "hamburger"],
+    "subs": [
+      { "name": "ground turkey", "notes": "Lean swap", "tags": ["poultry"] },
+      { "name": "lentils (cooked)", "notes": "Vegan crumble base", "tags": ["vegan"] },
+      { "name": "mushrooms (finely chopped)", "notes": "Umami + moisture", "tags": ["vegan"] }
+    ]
+  },
+  {
+    "key": "yogurt",
+    "aliases": ["plain yogurt", "greek yogurt"],
+    "subs": [
+      { "name": "coconut yogurt", "notes": "Dairy-free", "tags": ["vegan", "dairy-free"] },
+      { "name": "strained plant yogurt", "notes": "Thicker texture", "tags": ["vegan", "dairy-free"] },
+      { "name": "sour cream", "notes": "Not dairy-free", "tags": ["dairy"] }
+    ]
+  },
+  {
+    "key": "cheese",
+    "aliases": ["cheddar", "mozzarella", "parmesan"],
+    "subs": [
+      { "name": "nutritional yeast", "notes": "Cheesy flavor booster", "tags": ["vegan", "dairy-free"] },
+      { "name": "vegan cheese", "notes": "Melting varies", "tags": ["vegan", "dairy-free"] }
+    ]
+  },
+  {
+    "key": "honey",
+    "aliases": [],
+    "subs": [
+      { "name": "maple syrup", "notes": "Vegan swap 1:1", "tags": ["vegan"] },
+      { "name": "agave syrup", "notes": "Sweeter; reduce slightly", "tags": ["vegan"] }
+    ]
+  },
+  {
+    "key": "bacon",
+    "aliases": ["pork bacon"],
+    "subs": [
+      { "name": "turkey bacon", "notes": "Leaner", "tags": ["poultry"] },
+      { "name": "mushroom bacon", "notes": "Roasted seasoned slices", "tags": ["vegan"] }
+    ]
+  },
+  {
+    "key": "gelatin",
+    "aliases": [],
+    "subs": [
+      { "name": "agar agar", "notes": "Vegan gelling agent", "tags": ["vegan"] }
+    ]
+  },
+  {
+    "key": "mayonnaise",
+    "aliases": ["mayo"],
+    "subs": [
+      { "name": "greek yogurt", "notes": "Tangier, lighter", "tags": ["dairy"] },
+      { "name": "vegan mayo", "notes": "Egg-free", "tags": ["vegan", "dairy-free"] }
+    ]
+  },
+  {
+    "key": "heavy cream",
+    "aliases": ["whipping cream", "double cream"],
+    "subs": [
+      { "name": "coconut cream", "notes": "Dairy-free; coconut note", "tags": ["vegan", "dairy-free"] },
+      { "name": "evaporated milk", "notes": "Not dairy-free", "tags": ["dairy"] }
+    ]
+  }
+]
