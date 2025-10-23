@@ -1,11 +1,22 @@
 // app/chef-chat.tsx
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, FlatList, ActivityIndicator } from 'react-native';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  FlatList,
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  LayoutChangeEvent,
+} from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
 import { AI, type ChatMessage } from '../lib/ai';
 import { useToast } from '../hooks/useToast';
-import { usePing } from '../hooks/usePing'; // ⬅️ NEW
+import { usePing } from '../hooks/usePing'; // status pill
+import { analyticalReply } from '../lib/mathEngine'; // ⬅️ NEW
 
 const STORAGE_KEY = 'nibble-chef-thread-v1';
 
@@ -21,7 +32,14 @@ export default function ChefChatScreen() {
   const [loading, setLoading] = useState(false);
   const { show, ToastElement } = useToast();
   const listRef = useRef<FlatList<ChatMessage>>(null);
-  const { ok, checking, pingNow } = usePing(); // ⬅️ NEW
+  const { ok, checking, pingNow } = usePing();
+
+  // Height of the input bar so we can pad the list exactly
+  const [inputBarHeight, setInputBarHeight] = useState(68); // sensible default
+  const onInputBarLayout = (e: LayoutChangeEvent) => {
+    const h = Math.max(56, Math.ceil(e.nativeEvent.layout.height));
+    if (h !== inputBarHeight) setInputBarHeight(h);
+  };
 
   // Load saved thread on mount
   useEffect(() => {
@@ -54,8 +72,20 @@ export default function ChefChatScreen() {
 
     setInput('');
     setMessages(prev => [...prev, userMsg]);
-    setLoading(true);
 
+    // ⬇️ Try deterministic Analytical Mode first. If it answers, skip AI.
+    try {
+      const analytic = analyticalReply(text);
+      if (analytic) {
+        const assistantMsg: ChatMessage = { role: 'assistant', content: analytic };
+        setMessages(prev => [...prev, assistantMsg]);
+        return; // handled locally
+      }
+    } catch {
+      // If analytical threw for any reason, just fall through to AI.
+    }
+
+    setLoading(true);
     try {
       const replyText = await AI.chatOllama([...messages, userMsg]);
       const assistantMsg: ChatMessage = { role: 'assistant', content: replyText };
@@ -72,78 +102,103 @@ export default function ChefChatScreen() {
   };
 
   return (
-    <View style={{ flex: 1, padding: 12, backgroundColor: '#0B0D0F' }}>
-      <Text style={{ color: '#E6E9EF', fontSize: 22, fontWeight: '700', marginBottom: 8 }}>Chef Nibble</Text>
-
-      {/* Status pill + refresh */}
-      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
-        <View
-          style={{
-            width: 8, height: 8, borderRadius: 999,
-            backgroundColor: ok === true ? '#22c55e' : ok === false ? '#ef4444' : '#f59e0b'
-          }}
-        />
-        <Text style={{ marginLeft: 6, color: '#8FA3B8' }}>
-          {ok === true ? 'Local AI online' : ok === false ? 'AI offline' : 'Checking…'}
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      // Offset accounts for the native nav header so the input never hides under it.
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+    >
+      <View style={{ flex: 1, padding: 12, backgroundColor: '#0B0D0F' }}>
+        <Text style={{ color: '#E6E9EF', fontSize: 22, fontWeight: '700', marginBottom: 8 }}>
+          Chef Nibble
         </Text>
-        <TouchableOpacity onPress={pingNow} style={{ marginLeft: 10 }}>
-          <Text style={{ color: '#3E7BFA', fontWeight: '600' }}>
-            {checking ? '…' : 'Refresh'}
-          </Text>
-        </TouchableOpacity>
-      </View>
 
-      <FlatList
-        ref={listRef}
-        style={{ flex: 1 }}
-        data={messages.filter(m => m.role !== 'system')}
-        keyExtractor={(_, i) => String(i)}
-        onContentSizeChange={() => listRef.current?.scrollToOffset({ offset: 999999, animated: true })}
-        renderItem={({ item }) => (
+        {/* Status pill + refresh */}
+        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
           <View
             style={{
-              backgroundColor: item.role === 'user' ? '#1B2430' : '#14181D',
-              padding: 10,
+              width: 8, height: 8, borderRadius: 999,
+              backgroundColor: ok === true ? '#22c55e' : ok === false ? '#ef4444' : '#f59e0b'
+            }}
+          />
+          <Text style={{ marginLeft: 6, color: '#8FA3B8' }}>
+            {ok === true ? 'Local AI online' : ok === false ? 'AI offline' : 'Checking…'}
+          </Text>
+          <TouchableOpacity onPress={pingNow} style={{ marginLeft: 10 }}>
+            <Text style={{ color: '#3E7BFA', fontWeight: '600' }}>
+              {checking ? '…' : 'Refresh'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        <FlatList
+          ref={listRef}
+          style={{ flex: 1 }}
+          data={messages.filter(m => m.role !== 'system')}
+          keyExtractor={(_, i) => String(i)}
+          keyboardShouldPersistTaps="handled"
+          onContentSizeChange={() =>
+            listRef.current?.scrollToOffset({ offset: 999999, animated: true })
+          }
+          // Pad the bottom by the input height so content never hides behind the composer
+          contentContainerStyle={{ paddingBottom: inputBarHeight + 12 }}
+          renderItem={({ item }) => (
+            <View
+              style={{
+                backgroundColor: item.role === 'user' ? '#1B2430' : '#14181D',
+                padding: 10,
+                borderRadius: 12,
+                marginVertical: 6,
+              }}
+            >
+              <Text style={{ color: '#8FA3B8', fontSize: 12 }}>
+                {item.role === 'user' ? 'You' : 'Chef Nibble'}
+              </Text>
+              <Text style={{ color: '#E6E9EF', fontSize: 16 }}>{item.content}</Text>
+            </View>
+          )}
+          ListFooterComponent={loading ? <ActivityIndicator /> : null}
+        />
+
+        {/* Composer */}
+        <View
+          onLayout={onInputBarLayout}
+          style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}
+        >
+          <TextInput
+            style={{
+              flex: 1,
+              backgroundColor: '#14181D',
+              color: 'white',
               borderRadius: 12,
-              marginVertical: 6,
+              paddingHorizontal: 12,
+              paddingVertical: 10,
+            }}
+            placeholder="Ask the chef..."
+            placeholderTextColor="#777"
+            value={input}
+            onChangeText={setInput}
+            onSubmitEditing={sendMessage}
+            returnKeyType="send"
+          />
+          <TouchableOpacity
+            onPress={sendMessage}
+            disabled={loading}
+            style={{
+              backgroundColor: loading ? '#94a3b8' : '#3E7BFA',
+              borderRadius: 12,
+              paddingHorizontal: 16,
+              justifyContent: 'center'
             }}
           >
-            <Text style={{ color: '#8FA3B8', fontSize: 12 }}>
-              {item.role === 'user' ? 'You' : 'Chef Nibble'}
+            <Text style={{ color: 'white', fontWeight: '600' }}>
+              {loading ? 'Sending…' : 'Send'}
             </Text>
-            <Text style={{ color: '#E6E9EF', fontSize: 16 }}>{item.content}</Text>
-          </View>
-        )}
-        ListFooterComponent={loading ? <ActivityIndicator /> : null}
-      />
+          </TouchableOpacity>
+        </View>
 
-      <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
-        <TextInput
-          style={{
-            flex: 1,
-            backgroundColor: '#14181D',
-            color: 'white',
-            borderRadius: 12,
-            paddingHorizontal: 12,
-            paddingVertical: 8,
-          }}
-          placeholder="Ask the chef..."
-          placeholderTextColor="#777"
-          value={input}
-          onChangeText={setInput}
-          onSubmitEditing={sendMessage}
-          returnKeyType="send"
-        />
-        <TouchableOpacity
-          onPress={sendMessage}
-          disabled={loading}
-          style={{ backgroundColor: loading ? '#94a3b8' : '#3E7BFA', borderRadius: 12, paddingHorizontal: 16, justifyContent: 'center' }}
-        >
-          <Text style={{ color: 'white', fontWeight: '600' }}>{loading ? 'Sending…' : 'Send'}</Text>
-        </TouchableOpacity>
+        {ToastElement}
       </View>
-
-      {ToastElement}
-    </View>
+    </KeyboardAvoidingView>
   );
 }
