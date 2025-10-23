@@ -15,5 +15,9 @@ export default {
       EXPO_PUBLIC_DEFAULT_ZIP:
         process.env.EXPO_PUBLIC_DEFAULT_ZIP || '45202',
     },
+    android: {
+      // Ensures the screen resizes so the input isn't hidden by the keyboard
+      windowSoftInputMode: 'adjustResize',
+    },
   },
 };

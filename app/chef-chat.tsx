@@ -1,5 +1,5 @@
 // app/chef-chat.tsx
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -10,57 +10,54 @@ import {
   KeyboardAvoidingView,
   Platform,
   LayoutChangeEvent,
-} from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Haptics from 'expo-haptics';
-import { AI, type ChatMessage } from '../lib/ai';
-import { useToast } from '../hooks/useToast';
-import { usePing } from '../hooks/usePing'; // status pill
-import { analyticalReply } from '../lib/mathEngine'; // ⬅️ NEW
+} from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Haptics from "expo-haptics";
+import { AI, type ChatMessage } from "../lib/ai";
+import { useToast } from "../hooks/useToast";
+import { usePing } from "../hooks/usePing";
+import { localReasoningReply } from "../lib/mathEngine";
+import type { Prefs } from "../lib/substitutions";
 
-const STORAGE_KEY = 'nibble-chef-thread-v1';
+const STORAGE_KEY = "nibble-chef-thread-v1";
 
 export default function ChefChatScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
-      role: 'system',
+      role: "system",
       content:
-        'You are Chef Nibble. Be concise; stick to cooking, meal planning, ingredients. Return short steps and note allergens.',
+        "You are Chef Nibble. Be concise; stick to cooking, meal planning, ingredients, and substitutions. Return short steps and note allergens.",
     },
   ]);
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const { show, ToastElement } = useToast();
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const { ok, checking, pingNow } = usePing();
 
-  // Height of the input bar so we can pad the list exactly
-  const [inputBarHeight, setInputBarHeight] = useState(68); // sensible default
+  const [inputBarHeight, setInputBarHeight] = useState(68);
   const onInputBarLayout = (e: LayoutChangeEvent) => {
     const h = Math.max(56, Math.ceil(e.nativeEvent.layout.height));
     if (h !== inputBarHeight) setInputBarHeight(h);
   };
 
-  // Load saved thread on mount
+  // Load saved messages on mount
   useEffect(() => {
     (async () => {
       try {
         const raw = await AsyncStorage.getItem(STORAGE_KEY);
-        if (raw) {
-          const parsed = JSON.parse(raw) as ChatMessage[];
-          if (Array.isArray(parsed) && parsed.length > 0) setMessages(parsed);
-        }
+        if (raw) setMessages(JSON.parse(raw));
       } catch {}
     })();
   }, []);
 
-  // Persist on every change + auto scroll
+  // Persist messages & keep scrolled to bottom
   useEffect(() => {
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messages)).catch(() => {});
-    // auto-scroll to end
-    setTimeout(() => {
-      listRef.current?.scrollToOffset({ offset: 999999, animated: true });
-    }, 0);
+    setTimeout(
+      () => listRef.current?.scrollToOffset({ offset: 999999, animated: true }),
+      0
+    );
   }, [messages]);
 
   const sendMessage = async () => {
@@ -68,34 +65,40 @@ export default function ChefChatScreen() {
     if (!text || loading) return;
 
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    const userMsg: ChatMessage = { role: 'user', content: text };
+    const userMsg: ChatMessage = { role: "user", content: text };
+    setInput("");
+    setMessages((prev) => [...prev, userMsg]);
 
-    setInput('');
-    setMessages(prev => [...prev, userMsg]);
-
-    // ⬇️ Try deterministic Analytical Mode first. If it answers, skip AI.
     try {
-      const analytic = analyticalReply(text);
-      if (analytic) {
-        const assistantMsg: ChatMessage = { role: 'assistant', content: analytic };
-        setMessages(prev => [...prev, assistantMsg]);
-        return; // handled locally
+      // Try local deterministic reasoning (math or substitution)
+      const prefs: Prefs = { diet: "omnivore" };
+      const local = localReasoningReply(text, prefs);
+      if (local) {
+        const assistantMsg: ChatMessage = { role: "assistant", content: local };
+        setMessages((prev) => [...prev, assistantMsg]);
+        return;
       }
     } catch {
-      // If analytical threw for any reason, just fall through to AI.
+      // Fallback if reasoning throws
     }
 
+    // Otherwise, call Ollama
     setLoading(true);
     try {
       const replyText = await AI.chatOllama([...messages, userMsg]);
-      const assistantMsg: ChatMessage = { role: 'assistant', content: replyText };
-      setMessages(prev => [...prev, assistantMsg]);
+      const assistantMsg: ChatMessage = { role: "assistant", content: replyText };
+      setMessages((prev) => [...prev, assistantMsg]);
     } catch (err: any) {
       const msg = err?.message ?? String(err);
       show(`AI error: ${msg}`);
-      const errMsg: ChatMessage = { role: 'assistant', content: `Error: ${msg}` };
-      setMessages(prev => [...prev, errMsg]);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+      const errMsg: ChatMessage = {
+        role: "assistant",
+        content: `Error: ${msg}`,
+      };
+      setMessages((prev) => [...prev, errMsg]);
+      Haptics.notificationAsync(
+        Haptics.NotificationFeedbackType.Error
+      ).catch(() => {});
     } finally {
       setLoading(false);
     }
@@ -104,72 +107,89 @@ export default function ChefChatScreen() {
   return (
     <KeyboardAvoidingView
       style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      // Offset accounts for the native nav header so the input never hides under it.
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+      behavior={Platform.OS === "ios" ? "padding" : "height"}
+      keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}
     >
-      <View style={{ flex: 1, padding: 12, backgroundColor: '#0B0D0F' }}>
-        <Text style={{ color: '#E6E9EF', fontSize: 22, fontWeight: '700', marginBottom: 8 }}>
+      <View style={{ flex: 1, padding: 12, backgroundColor: "#0B0D0F" }}>
+        <Text
+          style={{
+            color: "#E6E9EF",
+            fontSize: 22,
+            fontWeight: "700",
+            marginBottom: 8,
+          }}
+        >
           Chef Nibble
         </Text>
 
-        {/* Status pill + refresh */}
-        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+        {/* Status indicator */}
+        <View
+          style={{ flexDirection: "row", alignItems: "center", marginBottom: 6 }}
+        >
           <View
             style={{
-              width: 8, height: 8, borderRadius: 999,
-              backgroundColor: ok === true ? '#22c55e' : ok === false ? '#ef4444' : '#f59e0b'
+              width: 8,
+              height: 8,
+              borderRadius: 999,
+              backgroundColor:
+                ok === true ? "#22c55e" : ok === false ? "#ef4444" : "#f59e0b",
             }}
           />
-          <Text style={{ marginLeft: 6, color: '#8FA3B8' }}>
-            {ok === true ? 'Local AI online' : ok === false ? 'AI offline' : 'Checking…'}
+          <Text style={{ marginLeft: 6, color: "#8FA3B8" }}>
+            {ok === true
+              ? "Local AI online"
+              : ok === false
+              ? "AI offline"
+              : "Checking…"}
           </Text>
           <TouchableOpacity onPress={pingNow} style={{ marginLeft: 10 }}>
-            <Text style={{ color: '#3E7BFA', fontWeight: '600' }}>
-              {checking ? '…' : 'Refresh'}
+            <Text style={{ color: "#3E7BFA", fontWeight: "600" }}>
+              {checking ? "…" : "Refresh"}
             </Text>
           </TouchableOpacity>
         </View>
 
+        {/* Message list */}
         <FlatList
           ref={listRef}
           style={{ flex: 1 }}
-          data={messages.filter(m => m.role !== 'system')}
+          data={messages.filter((m) => m.role !== "system")}
           keyExtractor={(_, i) => String(i)}
           keyboardShouldPersistTaps="handled"
           onContentSizeChange={() =>
             listRef.current?.scrollToOffset({ offset: 999999, animated: true })
           }
-          // Pad the bottom by the input height so content never hides behind the composer
           contentContainerStyle={{ paddingBottom: inputBarHeight + 12 }}
           renderItem={({ item }) => (
             <View
               style={{
-                backgroundColor: item.role === 'user' ? '#1B2430' : '#14181D',
+                backgroundColor: item.role === "user" ? "#1B2430" : "#14181D",
                 padding: 10,
                 borderRadius: 12,
                 marginVertical: 6,
               }}
             >
-              <Text style={{ color: '#8FA3B8', fontSize: 12 }}>
-                {item.role === 'user' ? 'You' : 'Chef Nibble'}
+              <Text style={{ color: "#8FA3B8", fontSize: 12 }}>
+                {item.role === "user" ? "You" : "Chef Nibble"}
               </Text>
-              <Text style={{ color: '#E6E9EF', fontSize: 16 }}>{item.content}</Text>
+              <Text style={{ color: "#E6E9EF", fontSize: 16 }}>
+                {item.content}
+              </Text>
             </View>
           )}
           ListFooterComponent={loading ? <ActivityIndicator /> : null}
         />
 
-        {/* Composer */}
+        {/* Input composer */}
         <View
           onLayout={onInputBarLayout}
-          style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}
+          style={{ flexDirection: "row", gap: 8, marginTop: 8 }}
         >
           <TextInput
             style={{
               flex: 1,
-              backgroundColor: '#14181D',
-              color: 'white',
+              backgroundColor: "#14181D",
+              color: "white",
               borderRadius: 12,
               paddingHorizontal: 12,
               paddingVertical: 10,
@@ -185,14 +205,14 @@ export default function ChefChatScreen() {
             onPress={sendMessage}
             disabled={loading}
             style={{
-              backgroundColor: loading ? '#94a3b8' : '#3E7BFA',
+              backgroundColor: loading ? "#94a3b8" : "#3E7BFA",
               borderRadius: 12,
               paddingHorizontal: 16,
-              justifyContent: 'center'
+              justifyContent: "center",
             }}
           >
-            <Text style={{ color: 'white', fontWeight: '600' }}>
-              {loading ? 'Sending…' : 'Send'}
+            <Text style={{ color: "white", fontWeight: "600" }}>
+              {loading ? "Sending…" : "Send"}
             </Text>
           </TouchableOpacity>
         </View>
