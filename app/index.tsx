@@ -16,10 +16,32 @@ export default function Home() {
         <Link href="/scan" style={{ color: '#2563eb', fontWeight: '700', fontSize: 18 }}>
           → Scan fridge
         </Link>
-        <Link href="/recipes" style={{ color: '#2563eb', fontWeight: '700', fontSize: 18, marginTop: 12 }}>
+
+        <Link
+          href="/recipes"
+          style={{ color: '#2563eb', fontWeight: '700', fontSize: 18, marginTop: 12 }}
+        >
           → Recipes
         </Link>
-        <Link href="/rewards" style={{ color: '#2563eb', fontWeight: '700', fontSize: 18, marginTop: 12 }}>
+
+        <Link
+          href="/planner"
+          style={{ color: '#2563eb', fontWeight: '700', fontSize: 18, marginTop: 12 }}
+        >
+          → Meal planner
+        </Link>
+
+        <Link
+          href="/chef-chat"
+          style={{ color: '#2563eb', fontWeight: '700', fontSize: 18, marginTop: 12 }}
+        >
+          → Chef Chat
+        </Link>
+
+        <Link
+          href="/rewards"
+          style={{ color: '#2563eb', fontWeight: '700', fontSize: 18, marginTop: 12 }}
+        >
           → Rewards
         </Link>
       </View>

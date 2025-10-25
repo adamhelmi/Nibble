@@ -23,12 +23,14 @@ import {
   CURRENT_PRICING_URL
 } from "../lib/livePricing";
 
-// Substitutions engine (lib/ is sibling to app/)
+// Substitutions engine
 import {
   getSubstitutions,
   hasSubstitutions,
-  type Prefs as SubPrefs
 } from "../lib/substitutions";
+
+// ⬅️ NEW: global user preferences
+import { usePrefs } from "../lib/prefs";
 
 // ---------- Small presentational helpers ----------
 function Divider() {
@@ -129,14 +131,16 @@ function estimateRecipeCostUSD(ingredients: string[], book?: PriceBook): { total
 function RuleRecipeCard({ r, priceBook }: { r: Recipe; priceBook?: PriceBook }) {
   const [open, setOpen] = useState(false);
 
-  // Compute a live cost estimate from the rule recipe ingredients if we have a priceBook.
+  // Compute a live cost estimate from the rule recipe ingredients if we have a priceBook;
+  // fallback to the legacy static estimatedCost (per serving) if we don't.
   const live = useMemo(() => estimateRecipeCostUSD(r.ingredients, priceBook), [r, priceBook]);
-  const costSuffix = priceBook ? ` · ~$${live.total.toFixed(2)} est.` : "";
+  const costDisplay =
+    priceBook ? `~$${live.total.toFixed(2)}` : `$${r.estimatedCost.toFixed(2)}`;
 
   return (
     <View style={{ padding: 14, borderRadius: 14, backgroundColor: C.card, marginBottom: 12, shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 8, elevation: 2, borderWidth: 1, borderColor: "#eef2f7" }}>
       <Text style={{ fontSize: 16, fontWeight: "700" }}>{r.title}</Text>
-      <MetaLine text={`${r.minutes} min${costSuffix}`} />
+      <MetaLine text={`${r.minutes} min · ${costDisplay}/serving`} />
       <MetaLine text={`Needs: ${r.ingredients.join(", ")}`} muted />
       {!!priceBook && live.missing.length > 0 && (
         <Text style={{ color: "#6b7280", marginTop: 4 }}>
@@ -199,10 +203,33 @@ function rebuildRawAfterSwap(raw: string, newName: string): string {
   return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
-// ---------- AI recipe card (shows live cost + substitutions on tap + replace) ----------
+// Tiny chip for rationale/tags
+function TagChip({ text }: { text: string }) {
+  return (
+    <View
+      style={{
+        backgroundColor: "#e2e8f0",
+        borderColor: "#cbd5e1",
+        borderWidth: 1,
+        paddingHorizontal: 8,
+        paddingVertical: 3,
+        borderRadius: 999,
+        marginRight: 6,
+        marginTop: 6
+      }}
+    >
+      <Text style={{ fontSize: 12, color: "#0f172a", fontWeight: "700" }}>{text}</Text>
+    </View>
+  );
+}
+
+// ---------- AI recipe card (uses live cost + substitutions + replace) ----------
 function AIRecipeCard({ r, priceBook }: { r: AIRecipe; priceBook?: PriceBook }) {
   // Local, mutable ingredients for this card (so we don't mutate source data)
   const [localIngredients, setLocalIngredients] = useState<string[]>(r.ingredients);
+
+  // ⬅️ NEW: global prefs drive substitution filtering
+  const { prefs } = usePrefs();
 
   // Re-compute cost from localIngredients
   const cost = useMemo(() => estimateRecipeCostUSD(localIngredients, priceBook), [localIngredients, priceBook]);
@@ -212,13 +239,6 @@ function AIRecipeCard({ r, priceBook }: { r: AIRecipe; priceBook?: PriceBook }) 
   const [subs, setSubs] = useState<Array<{ name: string; notes?: string; tags?: string[] }>>([]);
   const [open, setOpen] = useState(false);
 
-  // Preferences (wire to real store later)
-  const prefs: SubPrefs = {
-    // diet: "vegan",
-    // allergens: ["nut", "soy"],
-    // dislikes: ["coconut"]
-  };
-
   function handleTapIngredient(raw: string) {
     const parsed = parseIngredient(raw);
     const key = parsed.name;
@@ -227,7 +247,7 @@ function AIRecipeCard({ r, priceBook }: { r: AIRecipe; priceBook?: PriceBook }) 
       setSubs([]);
       return;
     }
-    const result = getSubstitutions(key, prefs);
+    const result = getSubstitutions(key, prefs); // <-- filtered by global prefs
     setSelectedIng(raw);
     setSubs(result.slice(0, 8));
   }
@@ -286,16 +306,26 @@ function AIRecipeCard({ r, priceBook }: { r: AIRecipe; priceBook?: PriceBook }) 
                 style={{
                   paddingHorizontal: 10,
                   paddingVertical: 6,
-                  borderRadius: 999,
-                  marginRight: 8,
-                  marginBottom: 8,
-                  backgroundColor: "#e2e8f0",
+                  borderRadius: 12,
+                  marginRight: 10,
+                  marginBottom: 10,
+                  backgroundColor: "#ffffff",
                   borderWidth: 1,
-                  borderColor: "#cbd5e1"
+                  borderColor: "#cbd5e1",
+                  maxWidth: "100%"
                 }}
               >
                 <Text style={{ fontWeight: "700", color: "#0f172a" }}>{s.name}</Text>
                 {s.notes ? <Text style={{ color: "#475569" }}> · {s.notes}</Text> : null}
+
+                {/* NEW: render reason/tag chips below each option */}
+                {Array.isArray(s.tags) && s.tags.length > 0 && (
+                  <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
+                    {s.tags.slice(0, 5).map((t, i2) => (
+                      <TagChip key={`${t}-${i2}`} text={t} />
+                    ))}
+                  </View>
+                )}
               </TouchableOpacity>
             ))}
           </View>
@@ -537,3 +567,4 @@ export default function RecipesScreen() {
     </View>
   );
 }
+

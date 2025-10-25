@@ -1,8 +1,10 @@
-// app/lib/mathEngine.ts
+// lib/mathEngine.ts
 // Deterministic conversions, scaling, cost math, and local analytical reasoning for Nibble.
 
 import { normalize as normName, type PriceBook } from "./livePricing";
-import { getSubstitutions, type Prefs } from "./substitutions";
+import { getSubstitutions } from "./substitutions";
+import type { Prefs } from "./prefs";
+import { DEFAULT_PREFS } from "./prefs";
 
 // --- Core Types ---------------------------------------------------------------
 
@@ -33,30 +35,14 @@ export function normalizeUnit(u: string): Unit {
   if (x === "tablespoon" || x === "tablespoons") return "tbsp";
   if (x === "teaspoon" || x === "teaspoons") return "tsp";
   if (x === "cups") return "cup";
-  if (
-    x === "piece" ||
-    x === "pieces" ||
-    x === "pc" ||
-    x === "pcs" ||
-    x === "ea" ||
-    x === "each" ||
-    x === "whole"
-  )
-    return "unit";
-  if (["g", "kg", "ml", "l", "tbsp", "tsp", "cup", "unit"].includes(x))
-    return x as Unit;
+  if (["piece","pieces","pc","pcs","ea","each","whole"].includes(x)) return "unit";
+  if (["g", "kg", "ml", "l", "tbsp", "tsp", "cup", "unit"].includes(x)) return x as Unit;
   return "unit";
 }
 
-function isMass(u: Unit) {
-  return MASS_UNITS.has(u);
-}
-function isVol(u: Unit) {
-  return VOL_UNITS.has(u);
-}
-function isCnt(u: Unit) {
-  return COUNT_UNITS.has(u);
-}
+function isMass(u: Unit) { return MASS_UNITS.has(u); }
+function isVol(u: Unit)  { return VOL_UNITS.has(u); }
+function isCnt(u: Unit)  { return COUNT_UNITS.has(u); }
 
 export function convert(value: number, from: Unit, to: Unit): number {
   if (from === to) return value;
@@ -69,33 +55,18 @@ export function convert(value: number, from: Unit, to: Unit): number {
   if (isVol(from) && isVol(to)) {
     let ml = 0;
     switch (from) {
-      case "l":
-        ml = value * 1000;
-        break;
-      case "ml":
-        ml = value;
-        break;
-      case "tbsp":
-        ml = value * TBSP_TO_ML;
-        break;
-      case "tsp":
-        ml = value * TSP_TO_ML;
-        break;
-      case "cup":
-        ml = value * CUP_TO_ML;
-        break;
+      case "l":   ml = value * 1000; break;
+      case "ml":  ml = value; break;
+      case "tbsp": ml = value * TBSP_TO_ML; break;
+      case "tsp":  ml = value * TSP_TO_ML; break;
+      case "cup":  ml = value * CUP_TO_ML; break;
     }
     switch (to) {
-      case "l":
-        return ml / 1000;
-      case "ml":
-        return ml;
-      case "tbsp":
-        return ml / TBSP_TO_ML;
-      case "tsp":
-        return ml / TSP_TO_ML;
-      case "cup":
-        return ml / CUP_TO_ML;
+      case "l":   return ml / 1000;
+      case "ml":  return ml;
+      case "tbsp": return ml / TBSP_TO_ML;
+      case "tsp":  return ml / TSP_TO_ML;
+      case "cup":  return ml / CUP_TO_ML;
     }
   }
 
@@ -107,12 +78,8 @@ export function convert(value: number, from: Unit, to: Unit): number {
 // --- Scaling ------------------------------------------------------------------
 
 export function scaleRecipe(ratio: number, ingredients: Ingredient[]): Ingredient[] {
-  if (!isFinite(ratio) || ratio <= 0)
-    throw new Error(`Invalid scale ratio ${ratio}`);
-  return ingredients.map((i) => ({
-    ...i,
-    qty: +(i.qty * ratio).toFixed(4),
-  }));
+  if (!isFinite(ratio) || ratio <= 0) throw new Error(`Invalid scale ratio ${ratio}`);
+  return ingredients.map(i => ({ ...i, qty: +(i.qty * ratio).toFixed(4) }));
 }
 
 // --- Pricing ------------------------------------------------------------------
@@ -120,10 +87,7 @@ export function scaleRecipe(ratio: number, ingredients: Ingredient[]): Ingredien
 export function toPriceKey(name: string): string {
   const cleaned = normName(
     name
-      .replace(
-        /\b(fresh|chopped|diced|minced|boneless|skinless|large|small|organic)\b/gi,
-        ""
-      )
+      .replace(/\b(fresh|chopped|diced|minced|boneless|skinless|large|small|organic)\b/gi, "")
       .replace(/\s+/g, " ")
       .trim()
   );
@@ -137,11 +101,8 @@ export function totalCost(ingredients: Ingredient[], priceBook: PriceBook): numb
     const price = priceBook[key];
     if (!price) continue;
     let qtyInPriceUnit: number | null = null;
-    try {
-      qtyInPriceUnit = convert(ing.qty, ing.unit, price.unit as Unit);
-    } catch {
-      qtyInPriceUnit = null;
-    }
+    try { qtyInPriceUnit = convert(ing.qty, ing.unit, price.unit as Unit); }
+    catch { qtyInPriceUnit = null; }
     if (qtyInPriceUnit == null) continue;
     total += qtyInPriceUnit * price.amount;
   }
@@ -152,30 +113,15 @@ export function costBreakdown(
   ingredients: Ingredient[],
   priceBook: PriceBook
 ): Array<{ name: string; qty: number; unit: Unit; unitPricedAs?: Unit; cost?: number }> {
-  const rows: Array<{
-    name: string;
-    qty: number;
-    unit: Unit;
-    unitPricedAs?: Unit;
-    cost?: number;
-  }> = [];
+  const rows: Array<{ name: string; qty: number; unit: Unit; unitPricedAs?: Unit; cost?: number }> = [];
   for (const ing of ingredients) {
     const key = toPriceKey(ing.name);
     const price = priceBook[key];
-    if (!price) {
-      rows.push({ name: ing.name, qty: ing.qty, unit: ing.unit });
-      continue;
-    }
+    if (!price) { rows.push({ name: ing.name, qty: ing.qty, unit: ing.unit }); continue; }
     try {
       const q = convert(ing.qty, ing.unit, price.unit as Unit);
       const cost = +(q * price.amount).toFixed(2);
-      rows.push({
-        name: ing.name,
-        qty: ing.qty,
-        unit: ing.unit,
-        unitPricedAs: price.unit as Unit,
-        cost,
-      });
+      rows.push({ name: ing.name, qty: ing.qty, unit: ing.unit, unitPricedAs: price.unit as Unit, cost });
     } catch {
       rows.push({ name: ing.name, qty: ing.qty, unit: ing.unit });
     }
@@ -191,8 +137,7 @@ function parseFraction(s: string): number {
   for (const p of parts) {
     if (p.includes("/")) {
       const [a, b] = p.split("/");
-      const n = parseFloat(a),
-        d = parseFloat(b);
+      const n = parseFloat(a), d = parseFloat(b);
       if (isFinite(n) && isFinite(d) && d !== 0) total += n / d;
     } else {
       const n = parseFloat(p);
@@ -210,8 +155,7 @@ function tokenize(expr: string): string[] {
     .replace(/%\s*(?=[\d(]|$)/g, "%");
   if (/[^0-9+\-*/^().%\s]/.test(x)) {
     x = x.replace(/[a-zA-Z]+/g, " ").replace(/\s+/g, " ").trim();
-    if (/[^0-9+\-*/^().%\s]/.test(x))
-      throw new Error("Unsupported characters in expression");
+    if (/[^0-9+\-*/^().%\s]/.test(x)) throw new Error("Unsupported characters in expression");
   }
   const tokens: string[] = [];
   const re = /(\d+(?:\.\d+)?%?|\(|\)|\+|\-|\*|\/|\^)/g;
@@ -227,28 +171,17 @@ function toRPN(tokens: string[]): string[] {
   const rightAssoc = new Set<string>(["^"]);
   for (const t of tokens) {
     if (/^\d/.test(t)) {
-      if (t.endsWith("%")) {
-        const n = parseFloat(t.slice(0, -1));
-        out.push(String(n / 100));
-      } else {
-        out.push(t);
-      }
+      if (t.endsWith("%")) { const n = parseFloat(t.slice(0, -1)); out.push(String(n / 100)); }
+      else out.push(t);
     } else if (t in prec) {
-      while (
-        stack.length &&
-        stack[stack.length - 1] in prec &&
-        ((rightAssoc.has(t) &&
-          prec[t] < prec[stack[stack.length - 1]]) ||
-          (!rightAssoc.has(t) &&
-            prec[t] <= prec[stack[stack.length - 1]]))
-      )
+      while (stack.length && stack[stack.length - 1] in prec &&
+            ((rightAssoc.has(t) && prec[t] < prec[stack[stack.length - 1]]) ||
+             (!rightAssoc.has(t) && prec[t] <= prec[stack[stack.length - 1]])))
         out.push(stack.pop() as string);
       stack.push(t);
-    } else if (t === "(") {
-      stack.push(t);
-    } else if (t === ")") {
-      while (stack.length && stack[stack.length - 1] !== "(")
-        out.push(stack.pop() as string);
+    } else if (t === "(") stack.push(t);
+    else if (t === ")") {
+      while (stack.length && stack[stack.length - 1] !== "(") out.push(stack.pop() as string);
       if (!stack.length) throw new Error("Mismatched parentheses");
       stack.pop();
     }
@@ -264,31 +197,16 @@ function toRPN(tokens: string[]): string[] {
 function evalRPN(rpn: string[]): number {
   const st: number[] = [];
   for (const t of rpn) {
-    if (/^\-?\d+(\.\d+)?$/.test(t)) {
-      st.push(parseFloat(t));
-      continue;
-    }
-    const b = st.pop();
-    const a = st.pop();
+    if (/^\-?\d+(\.\d+)?$/.test(t)) { st.push(parseFloat(t)); continue; }
+    const b = st.pop(); const a = st.pop();
     if (a === undefined || b === undefined) throw new Error("Bad expression");
     switch (t) {
-      case "+":
-        st.push(a + b);
-        break;
-      case "-":
-        st.push(a - b);
-        break;
-      case "*":
-        st.push(a * b);
-        break;
-      case "/":
-        st.push(a / b);
-        break;
-      case "^":
-        st.push(Math.pow(a, b));
-        break;
-      default:
-        throw new Error("Unknown operator");
+      case "+": st.push(a + b); break;
+      case "-": st.push(a - b); break;
+      case "*": st.push(a * b); break;
+      case "/": st.push(a / b); break;
+      case "^": st.push(Math.pow(a, b)); break;
+      default: throw new Error("Unknown operator");
     }
   }
   if (st.length !== 1 || !isFinite(st[0])) throw new Error("Bad expression");
@@ -312,24 +230,17 @@ function parseQty(s: string): Qty | null {
   return { value: qty, unit };
 }
 
-export function analyzeNeededAvailable(
-  text: string
-): { ok: boolean; message?: string } {
+export function analyzeNeededAvailable(text: string): { ok: boolean; message?: string } {
   const neededMatch = text.match(/needed\s*:\s*([^\n\r]+)/i);
-  const availMatch = text.match(/available\s*:\s*([^\n\r]+)/i);
+  const availMatch  = text.match(/available\s*:\s*([^\n\r]+)/i);
   if (!neededMatch || !availMatch) return { ok: false };
   const needed = parseQty(neededMatch[1]);
-  const avail = parseQty(availMatch[1]);
+  const avail  = parseQty(availMatch[1]);
   if (!needed || !avail) return { ok: false };
   let availInNeeded = avail.value;
-  try {
-    availInNeeded = convert(avail.value, avail.unit, needed.unit);
-  } catch {}
+  try { availInNeeded = convert(avail.value, avail.unit, needed.unit); } catch {}
   const shortage = +(needed.value - availInNeeded).toFixed(4);
-  const pct =
-    needed.value > 0
-      ? +((Math.max(shortage, 0) / needed.value) * 100).toFixed(2)
-      : 0;
+  const pct = needed.value > 0 ? +((Math.max(shortage, 0) / needed.value) * 100).toFixed(2) : 0;
   const unit = needed.unit;
   const lines = [
     `Needed: ${needed.value}${unit !== "unit" ? unit : ""}`,
@@ -343,16 +254,10 @@ export function analyzeNeededAvailable(
 
 // --- Analytical + Substitution Reasoning -------------------------------------
 
-export function detectMathIntent(
-  text: string
-): "needed_available" | "calc" | null {
-  if (/needed\s*:/.test(text) && /available\s*:/.test(text))
-    return "needed_available";
+export function detectMathIntent(text: string): "needed_available" | "calc" | null {
+  if (/needed\s*:/.test(text) && /available\s*:/.test(text)) return "needed_available";
   if (/[+\-*/^()%×÷]/.test(text)) return "calc";
-  if (
-    /\b(g|kg|ml|l|tbsp|tsp|cup|cups|grams|liters|milliliters)\b/i.test(text)
-  )
-    return "calc";
+  if (/\b(g|kg|ml|l|tbsp|tsp|cup|cups|grams|liters|milliliters)\b/i.test(text)) return "calc";
   return null;
 }
 
@@ -380,8 +285,7 @@ export function analyticalReply(text: string): string | null {
 
 // --- Substitution Reply ------------------------------------------------------
 
-export function substitutionReply(text: string, prefs: Prefs = {}): string | null {
-  const lower = text.toLowerCase();
+export function substitutionReply(text: string, prefs?: Partial<Prefs>): string | null {
   const patterns = [
     /substitute for ([a-z\s]+)/i,
     /replace ([a-z\s]+) with/i,
@@ -392,14 +296,14 @@ export function substitutionReply(text: string, prefs: Prefs = {}): string | nul
   let target: string | null = null;
   for (const p of patterns) {
     const m = text.match(p);
-    if (m && m[1]) {
-      target = m[1].trim();
-      break;
-    }
+    if (m && m[1]) { target = m[1].trim(); break; }
   }
   if (!target) return null;
-  const subs = getSubstitutions(target, prefs);
+
+  const p: Prefs = { ...DEFAULT_PREFS, ...(prefs ?? {}) };
+  const subs = getSubstitutions(target, p);
   if (!subs.length) return null;
+
   const lines = [`Substitutes for **${target}**:`];
   for (const s of subs.slice(0, 4)) {
     const tags = s.tags?.length ? ` (${s.tags.join(", ")})` : "";
@@ -411,7 +315,8 @@ export function substitutionReply(text: string, prefs: Prefs = {}): string | nul
 
 // --- Unified Deterministic Router --------------------------------------------
 
-export function localReasoningReply(text: string, prefs?: Prefs): string | null {
+export function localReasoningReply(text: string, prefs?: Partial<Prefs>): string | null {
   return substitutionReply(text, prefs) || analyticalReply(text);
 }
+
 

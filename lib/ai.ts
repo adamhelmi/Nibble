@@ -1,5 +1,6 @@
 // lib/ai.ts
 import Constants from "expo-constants";
+import { ensurePrefsLoaded, getPrefs, type Prefs } from "./prefs";
 
 /** ---------- Types ---------- */
 export type AIRecipe = {
@@ -16,15 +17,12 @@ export type ChatMessage = {
 
 /** ---------- Config ---------- */
 // Read the LAN URL from app.config.js -> extra.EXPO_PUBLIC_LLAMA_URL
-// Example in app.config.js:
-// extra: { EXPO_PUBLIC_LLAMA_URL: "http://192.168.1.12:11434" }
 export const OLLAMA_URL: string =
   ((Constants.expoConfig?.extra as any)?.EXPO_PUBLIC_LLAMA_URL as string) || "";
 
 const MODEL = "llama3.1:8b";
 
 /** ---------- Utils ---------- */
-// Hard timeout wrapper so we never hang forever
 async function timeoutFetch(input: string, init: RequestInit, ms = 30000) {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), ms);
@@ -46,9 +44,27 @@ export async function pingOllama(timeoutMs = 4000): Promise<boolean> {
   }
 }
 
+/** ---------- Prefs-aware system header ---------- */
+function prefsHeader(p: Prefs): string {
+  const chips: string[] = [];
+  if (p.diet && p.diet !== "omnivore") chips.push(`diet:${p.diet}`);
+  if (p.religious && p.religious !== "none") chips.push(`religious:${p.religious}`);
+  if (p.allergens?.length) chips.push(`allergens:${p.allergens.join("|")}`);
+  if (p.dislikes?.length) chips.push(`dislikes:${p.dislikes.join("|")}`);
+
+  const rules = [
+    `You are Chef Nibble. Be concise and practical. Prioritize user preferences strictly.`,
+    `Never propose items that violate diet or religious rules.`,
+    `Avoid allergens and disliked items entirely; offer safe substitutions when needed.`,
+    `Return short steps and call out potential allergens if uncertain.`,
+  ].join(" ");
+
+  const tagLine = chips.length ? `Constraints: ${chips.join(" • ")}.` : `Constraints: none set.`;
+  return `${rules} ${tagLine}`;
+}
+
 /** =======================================================================
- *  Chef Chat (Ollama /api/chat) — used by /app/chef-chat.tsx
- *  Returns assistant message content as a single string (non-stream).
+ *  Chef Chat (Ollama /api/chat) — prefs-injected system message
  *  ======================================================================= */
 export async function chatOllama(
   messages: ChatMessage[],
@@ -58,10 +74,18 @@ export async function chatOllama(
     throw new Error("No Ollama URL set in .env / app.config.js (EXPO_PUBLIC_LLAMA_URL).");
   }
 
+  // Ensure prefs are loaded and inject a system header if caller didn't provide one.
+  await ensurePrefsLoaded();
+  const prefs = getPrefs();
+  const hasSystem = messages.some((m) => m.role === "system");
+  const finalMessages: ChatMessage[] = hasSystem
+    ? messages
+    : [{ role: "system", content: prefsHeader(prefs) }, ...messages];
+
   const body = {
     model: MODEL,
-    messages,
-    stream: options?.stream ?? false, // keep simple for Expo; streaming later
+    messages: finalMessages,
+    stream: options?.stream ?? false,
     options: {
       temperature: options?.temperature ?? 0.7,
       num_ctx: options?.num_ctx ?? 4096,
@@ -83,7 +107,6 @@ export async function chatOllama(
     throw new Error(`Ollama error ${res.status}: ${text}`);
   }
 
-  // /api/chat returns { message: { role, content }, ... }
   const data = (await res.json()) as any;
   const content = data?.message?.content;
   if (typeof content !== "string") {
@@ -94,20 +117,35 @@ export async function chatOllama(
 
 /** =======================================================================
  *  Recipe Suggestions (strict JSON) — /api/generate with format:"json"
- *  Keeps current callers working as-is.
  *  ======================================================================= */
 export async function aiSuggestRecipes(
   pantry: string[]
 ): Promise<{ recipes: AIRecipe[]; error?: string }> {
   if (!OLLAMA_URL) return { recipes: [], error: "No Ollama URL set in .env / app.config.js." };
 
-  // Short, deterministic prompt for JSON output
+  await ensurePrefsLoaded();
+  const p = getPrefs();
+
+  const chips: string[] = [];
+  if (p.diet && p.diet !== "omnivore") chips.push(`diet:${p.diet}`);
+  if (p.religious && p.religious !== "none") chips.push(`religious:${p.religious}`);
+  if (p.allergens?.length) chips.push(`allergens:${p.allergens.join("|")}`);
+  if (p.dislikes?.length) chips.push(`dislikes:${p.dislikes.join("|")}`);
+
   const prompt = `
 Return ONLY JSON with this schema:
 {"recipes":[{"title":string,"minutes":number,"ingredients":string[],"steps":string[]}]}
 
+Context:
 Pantry: ${pantry.length ? pantry.join(", ") : "(none)"}.
-Suggest 2-3 simple, cheap recipes. Minutes must be a number.`;
+Constraints: ${chips.length ? chips.join(" • ") : "none"}.
+
+Requirements:
+- 2-3 simple, cheap recipes.
+- Respect constraints strictly (no violations).
+- "minutes" must be a number.
+- Ingredient names should be concise nouns ("onion", "olive oil"), not brand names.
+`;
 
   try {
     const res = await timeoutFetch(
@@ -118,8 +156,8 @@ Suggest 2-3 simple, cheap recipes. Minutes must be a number.`;
         body: JSON.stringify({
           model: MODEL,
           prompt,
-          format: "json", // force pure JSON
-          stream: false,  // single JSON response
+          format: "json",
+          stream: false,
         }),
       },
       30000
@@ -129,7 +167,6 @@ Suggest 2-3 simple, cheap recipes. Minutes must be a number.`;
       return { recipes: [], error: `Ollama error: ${res.status} ${res.statusText}` };
     }
 
-    // /api/generate with stream:false returns: { response: "<json string>", ... }
     const data = (await res.json()) as { response?: string };
     const jsonStr = data?.response ?? "{}";
 
@@ -137,7 +174,6 @@ Suggest 2-3 simple, cheap recipes. Minutes must be a number.`;
     try {
       parsed = JSON.parse(jsonStr);
     } catch {
-      // last-resort extraction if model wraps text
       const m = jsonStr.match(/\{[\s\S]*\}$/);
       parsed = m ? JSON.parse(m[0]) : {};
     }
@@ -157,10 +193,9 @@ Suggest 2-3 simple, cheap recipes. Minutes must be a number.`;
   }
 }
 
-/** ---------- Stable aggregate export (Interop-friendly) ---------- */
+/** ---------- Stable aggregate export ---------- */
 export const AI = { chatOllama, aiSuggestRecipes, OLLAMA_URL, pingOllama };
 
-// Optional one-time debug (remove later)
 console.log("[ai.ts] loaded", {
   chatOllama: typeof chatOllama,
   aiSuggestRecipes: typeof aiSuggestRecipes,
