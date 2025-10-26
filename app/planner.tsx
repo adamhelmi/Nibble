@@ -1,5 +1,5 @@
 // app/planner.tsx
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, TextInput } from 'react-native';
 import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
@@ -13,9 +13,11 @@ import { usePing } from '../hooks/usePing';
 import { buildPriceBookWithStats, type PriceBook, normalize as normName } from '../lib/livePricing';
 import type { Unit as PriceUnit } from '../lib/livePricing';
 
-// NEW: prefs + mock pool
 import { ensurePrefsLoaded, getPrefs } from '../lib/prefs';
 import { getMockCandidates } from '../lib/mockData';
+
+// Day 5: shared plan store
+import { usePlanStore, type WeekPlan, type Meal as PlanMeal, type MealSlot as StoreSlot } from '../lib/planStore';
 
 // ---------- local helpers from Recipes (parsers) ----------
 function parseFraction(s: string) {
@@ -106,11 +108,71 @@ function Badge({ text, kind = 'muted' }: { text: string; kind?: 'muted'|'warn'|'
 }
 const SLOT_LABEL: Record<MealSlot, string> = { breakfast:'Breakfast', lunch:'Lunch', dinner:'Dinner', snack:'Snack', dessert:'Dessert' };
 
+// ---------- types for unified render from store ----------
+type RenderSlot = { slot: MealSlot; recipe: { title: string; minutes: number; costUSD: number; ingredients: string[]; id?: string } };
+type RenderPlan = {
+  summary: {
+    days: number;
+    slotsPerDay: number;
+    totalCostUSD: number;
+    avgMinutes: number;
+    avgCoverage: number;
+    avgPriceConfidence: number;
+    costIsEstimate: boolean;
+  };
+  matrix: RenderSlot[][];
+};
+
+// Build a renderable plan from WeekPlan in the store (so UI survives remounts and reflects Chat edits)
+function buildRenderFromStore(week: WeekPlan | null | undefined): RenderPlan | null {
+  if (!week) return null;
+  const days = week.days ?? [];
+  const matrix: RenderSlot[][] = days.map((d) => {
+    const slots: RenderSlot[] = [];
+    (['breakfast','lunch','dinner','snack','dessert'] as MealSlot[]).forEach((s) => {
+      const m = d.slots[s] as PlanMeal | null;
+      if (m) {
+        slots.push({
+          slot: s,
+          recipe: {
+            id: m.recipeId,
+            title: m.name,
+            minutes: m.timeMins ?? 15,
+            costUSD: m.costUSD ?? 3.5,
+            ingredients: (m.ingredients ?? []).map(x => x.name),
+          },
+        });
+      }
+    });
+    return slots;
+  });
+
+  const flat = matrix.flatMap(day => day.map(x => x.recipe));
+  const totalCost = flat.reduce((a, r) => a + (r.costUSD || 0), 0);
+  const avgMin = flat.length ? flat.reduce((a, r) => a + (r.minutes || 0), 0) / flat.length : 0;
+  // We don’t yet store per-ingredient coverage in the store; present conservative estimates:
+  const avgCoverage = 0.65;
+  const avgPriceConfidence = 0.6;
+
+  return {
+    summary: {
+      days: days.length || 7,
+      slotsPerDay: days.length ? Math.round((flat.length / days.length) * 100) / 100 : 0,
+      totalCostUSD: +totalCost.toFixed(2),
+      avgMinutes: avgMin,
+      avgCoverage,
+      avgPriceConfidence,
+      costIsEstimate: true,
+    },
+    matrix,
+  };
+}
+
 // ---------- Screen ----------
 export default function PlannerScreen() {
+  const router = useRouter();
   const items = usePantry((s: PantryState) => s.items);
   const { show, ToastElement } = useToast();
-  const router = useRouter();
   const { ok } = usePing();
 
   const [zip] = useState<string>((Constants?.expoConfig?.extra as any)?.EXPO_PUBLIC_DEFAULT_ZIP ?? '45202');
@@ -124,7 +186,28 @@ export default function PlannerScreen() {
   const [loading, setLoading] = useState(false);
   const [aiPool, setAiPool] = useState<AIRecipe[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [plan, setPlan] = useState<ReturnType<typeof planWeek> | null>(null);
+  const [renderPlan, setRenderPlan] = useState<RenderPlan | null>(null);
+
+  // plan store hooks
+  const planStore = usePlanStore();
+  const { load, setWeek, getWeek, changes } = planStore;
+
+  // Load persisted week on mount and render it
+  useEffect(() => {
+    (async () => {
+      try { await load(); } catch {}
+      const w = getWeek();
+      const rp = buildRenderFromStore(w);
+      if (rp) setRenderPlan(rp);
+    })();
+    // subscribe to store changes to live-update UI (e.g., Chef Chat edits)
+    const unsub = usePlanStore.subscribe((state) => {
+  const rp = buildRenderFromStore(state.week);
+  setRenderPlan(rp);
+});
+
+    return () => unsub();
+  }, [load, getWeek]);
 
   const canGenerate = useMemo(() => items.length > 0, [items]);
 
@@ -153,6 +236,57 @@ export default function PlannerScreen() {
     });
   }
 
+  // Convert planner output → planStore WeekPlan (so it persists and is chat-editable)
+  function syncToPlanStore(out: ReturnType<typeof planWeek>) {
+    const start = new Date();
+    const days = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(start);
+      d.setDate(d.getDate() + i);
+      return { dateISO: d.toISOString().slice(0, 10), slots: { breakfast: null, lunch: null, dinner: null, snack: null, dessert: null } as Record<StoreSlot, PlanMeal | null> };
+    });
+
+    const matrix = toMatrix(out);
+    matrix.forEach((daySlots, di) => {
+      daySlots.forEach((s) => {
+        const slot = s.slot as StoreSlot;
+        const pm: PlanMeal = {
+          id: `${di}-${slot}-${s.recipe.title}`.toLowerCase().replace(/\s+/g, '-'),
+          name: s.recipe.title,
+          slot,
+          recipeId: s.recipe.id ?? undefined,
+          ingredients: (s.recipe.ingredients || []).map(n => ({ name: n })),
+          tags: [],
+          timeMins: s.recipe.minutes || 15,
+          costUSD: s.recipe.costUSD || 3.5,
+          nutrition: undefined,
+          source: 'deterministic',
+          locked: false,
+        };
+        days[di].slots[slot] = pm;
+      });
+    });
+
+    const weekId = (() => {
+      const date = new Date(Date.UTC(start.getFullYear(), start.getMonth(), start.getDate()));
+      const dayNum = (date.getUTCDay() + 6) % 7;
+      date.setUTCDate(date.getUTCDate() - dayNum + 3);
+      const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+      const week = 1 + Math.round(((+date - +firstThursday) / 86400000 - 3 + ((firstThursday.getUTCDay() + 6) % 7)) / 7);
+      return `${date.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+    })();
+
+    const week: WeekPlan = {
+      weekId,
+      days,
+      budgetUSD: isFinite(parseFloat(budgetCap)) ? parseFloat(budgetCap) : undefined,
+      timeVsMoney: Math.round(weightCost * 100),
+      updatedAt: new Date().toISOString(),
+      version: 1,
+    };
+
+    setWeek(week);
+  }
+
   async function generatePlan() {
     if (!canGenerate) { show('Add some pantry items or use Scan first.'); return; }
     setLoading(true);
@@ -165,24 +299,23 @@ export default function PlannerScreen() {
       const recs = ai.recipes || [];
       setAiPool(recs);
 
-      // 2) Build/ensure pricebook off AI terms (best effort)
+      // 2) Pricebook off AI terms (best effort)
       const aiTerms = Array.from(new Set(recs.flatMap(r => r.ingredients).map(s => normName(s))));
       await ensurePriceBook(aiTerms);
 
-      // 3) Convert AI → candidates
+      // 3) AI → candidates
       let cands: Candidate[] = mapAItoCandidates(recs);
 
-      // 4) If too few/too-similar, append mock pool filtered by prefs + pantry
+      // 4) Top up with mock pool for diversity
       if (cands.length < 12) {
         const mock = getMockCandidates(items, prefs, 40);
-        // de-dup by title
         const seen = new Set(cands.map(c => c.title.toLowerCase()));
         const extra = mock.filter(m => !seen.has(m.title.toLowerCase()));
         cands = [...cands, ...extra].slice(0, 40);
       }
       setCandidates(cands);
 
-      // 5) Plan week with controls
+      // 5) Plan week via deterministic engine
       const numericBudget = parseFloat(budgetCap);
       const out = planWeek(cands, {
         mealsPerDay,
@@ -191,9 +324,17 @@ export default function PlannerScreen() {
         diversityWeight,
         budgetCapUSD: isFinite(numericBudget) ? numericBudget : null,
       });
-      setPlan(out);
+
+      // 6) Persist into shared store (source of truth)
+      syncToPlanStore(out);
+
+      // 7) Build render plan from store so UI survives remounts + reflects Chat edits
+      const rp = buildRenderFromStore(usePlanStore.getState().week);
+      setRenderPlan(rp);
+
+      show('Plan generated and synced.');
     } catch (e: any) {
-      setPlan(null);
+      setRenderPlan(null);
       show(`Planner error: ${e?.message ?? String(e)}`);
     } finally {
       setLoading(false);
@@ -202,10 +343,28 @@ export default function PlannerScreen() {
 
   return (
     <ScrollView style={{ flex: 1, backgroundColor: C.bg }} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
-      <Text style={T.h1}>Weekly Planner</Text>
-      <Text style={[T.muted, { marginTop: 4 }]}>
-        Local AI: {ok ? 'online' : 'offline'} · AI URL: {OLLAMA_URL || '(missing)'}
-      </Text>
+      {/* Header */}
+      <View style={{ position: 'relative', paddingRight: 100 }}>
+        <Text style={T.h1}>Weekly Planner</Text>
+        <Text style={[T.muted, { marginTop: 4 }]}>
+          Local AI: {ok ? 'online' : 'offline'} · AI URL: {OLLAMA_URL || '(missing)'}
+        </Text>
+        {/* Chef Chat button (top-right) */}
+        <TouchableOpacity
+          onPress={() => router.push('/chef-chat')}
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 0,
+            backgroundColor: C.action,
+            paddingHorizontal: 12,
+            paddingVertical: 8,
+            borderRadius: 999,
+          }}
+        >
+          <Text style={{ color: '#fff', fontWeight: '700' }}>Chef Chat</Text>
+        </TouchableOpacity>
+      </View>
 
       {/* Controls */}
       <View style={{ marginTop: 12, padding: 12, borderWidth: 1, borderColor: C.border, borderRadius: 12, backgroundColor: '#f8fafc' }}>
@@ -257,18 +416,18 @@ export default function PlannerScreen() {
       </View>
 
       {/* Summary */}
-      {plan && (
+      {renderPlan && (
         <View style={{ marginTop: 16, padding: 12, borderRadius: 12, backgroundColor: '#ffffff', borderColor: C.border, borderWidth: 1 }}>
           <Text style={T.h2}>Summary</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
-            <Badge text={`Days: ${plan.summary.days}`} />
-            <Badge text={`Meals/day: ${plan.summary.slotsPerDay}`} />
-            <Badge text={`Total: $${plan.summary.totalCostUSD.toFixed(2)}`} kind={plan.summary.costIsEstimate ? 'warn' : 'ok'} />
-            <Badge text={`Avg time: ${plan.summary.avgMinutes.toFixed(0)} min`} />
-            <Badge text={`Coverage: ${(plan.summary.avgCoverage * 100).toFixed(0)}%`} kind={plan.summary.avgCoverage >= 0.7 ? 'ok' : 'warn'} />
-            <Badge text={`Price conf.: ${(plan.summary.avgPriceConfidence * 100).toFixed(0)}%`} />
+            <Badge text={`Days: ${renderPlan.summary.days}`} />
+            <Badge text={`Meals/day: ${renderPlan.summary.slotsPerDay}`} />
+            <Badge text={`Total: $${renderPlan.summary.totalCostUSD.toFixed(2)}`} kind={renderPlan.summary.costIsEstimate ? 'warn' : 'ok'} />
+            <Badge text={`Avg time: ${renderPlan.summary.avgMinutes.toFixed(0)} min`} />
+            <Badge text={`Coverage: ${(renderPlan.summary.avgCoverage * 100).toFixed(0)}%`} kind={renderPlan.summary.avgCoverage >= 0.7 ? 'ok' : 'warn'} />
+            <Badge text={`Price conf.: ${(renderPlan.summary.avgPriceConfidence * 100).toFixed(0)}%`} />
           </View>
-          {plan.summary.costIsEstimate && (
+          {renderPlan.summary.costIsEstimate && (
             <Text style={{ color: '#9a3412', marginTop: 6 }}>
               Cost marked as estimate due to limited price coverage. Live retailer adapters will harden this.
             </Text>
@@ -276,11 +435,11 @@ export default function PlannerScreen() {
         </View>
       )}
 
-      {/* Plan grid */}
-      {plan && (
+      {/* Plan grid (from shared store) */}
+      {renderPlan && (
         <View style={{ marginTop: 16 }}>
           <Text style={T.h2}>Your week</Text>
-          {toMatrix(plan).map((daySlots, dayIdx) => (
+          {renderPlan.matrix.map((daySlots, dayIdx) => (
             <View key={dayIdx} style={{ marginTop: 10, padding: 12, borderRadius: 12, backgroundColor: '#ffffff', borderColor: C.border, borderWidth: 1 }}>
               <Text style={{ fontWeight: '800', fontSize: 16 }}>Day {dayIdx + 1}</Text>
               {daySlots.map((slot, i) => (
@@ -301,11 +460,23 @@ export default function PlannerScreen() {
         </View>
       )}
 
-      {!plan && (
+      {!renderPlan && (
         <View style={{ marginTop: 16 }}>
           <Text style={T.muted}>No plan yet. Configure the controls above and tap “Generate plan”.</Text>
         </View>
       )}
+
+      {/* Change Log (edits from Chef Chat or UI) */}
+      <View style={{ marginTop: 24 }}>
+        <Text style={T.h2}>Change Log</Text>
+        {changes.length === 0 && <Text style={T.muted}>No edits yet.</Text>}
+        {changes.slice().reverse().map((c, idx) => (
+          <View key={idx} style={{ marginTop: 8, padding: 10, borderRadius: 10, borderWidth: 1, borderColor: '#eee', backgroundColor: '#fafafa' }}>
+            <Text style={{ fontWeight: '700' }}>{new Date(c.ts).toLocaleString()} · {c.actor}</Text>
+            <Text>{c.summary}</Text>
+          </View>
+        ))}
+      </View>
 
       {/* Debug */}
       <Text style={[T.muted, { marginTop: 16 }]}>Pantry: {items.length ? items.join(', ') : '— empty —'}</Text>

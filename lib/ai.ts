@@ -2,6 +2,9 @@
 import Constants from "expo-constants";
 import { ensurePrefsLoaded, getPrefs, type Prefs } from "./prefs";
 
+// Day 5 plan sync additions
+import { planCapsule, usePlanStore, type PlanCommand } from "./planStore";
+
 /** ---------- Types ---------- */
 export type AIRecipe = {
   title: string;
@@ -16,9 +19,11 @@ export type ChatMessage = {
 };
 
 /** ---------- Config ---------- */
-// Read the LAN URL from app.config.js -> extra.EXPO_PUBLIC_LLAMA_URL
+// Read the URL from app.config.js -> extra.EXPO_PUBLIC_LLAMA_URL (or .env)
 export const OLLAMA_URL: string =
-  ((Constants.expoConfig?.extra as any)?.EXPO_PUBLIC_LLAMA_URL as string) || "";
+  ((Constants.expoConfig?.extra as any)?.EXPO_PUBLIC_LLAMA_URL as string) ||
+  (process.env.EXPO_PUBLIC_LLAMA_URL as string) ||
+  "";
 
 const MODEL = "llama3.1:8b";
 
@@ -27,6 +32,7 @@ async function timeoutFetch(input: string, init: RequestInit, ms = 30000) {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), ms);
   try {
+    // Attach signal (without mutating the original init object)
     return await fetch(input, { ...init, signal: ctrl.signal });
   } finally {
     clearTimeout(id);
@@ -53,18 +59,39 @@ function prefsHeader(p: Prefs): string {
   if (p.dislikes?.length) chips.push(`dislikes:${p.dislikes.join("|")}`);
 
   const rules = [
-    `You are Chef Nibble. Be concise and practical. Prioritize user preferences strictly.`,
-    `Never propose items that violate diet or religious rules.`,
-    `Avoid allergens and disliked items entirely; offer safe substitutions when needed.`,
-    `Return short steps and call out potential allergens if uncertain.`,
+    `You are Chef Nibble. Be concise and practical.`,
+    `Respect the user's diet and religious rules strictly.`,
+    `Avoid allergens and dislikes entirely; offer safe substitutions when needed.`,
+    `Prefer short steps and point out uncertainty briefly if needed.`,
   ].join(" ");
 
   const tagLine = chips.length ? `Constraints: ${chips.join(" • ")}.` : `Constraints: none set.`;
   return `${rules} ${tagLine}`;
 }
 
+/** ---------- Plan snapshot header (Day 5) ---------- */
+function planHeader(): string {
+  try {
+    return [
+      `=== PLAN SNAPSHOT ===`,
+      planCapsule(),
+      `Instructions:`,
+      `- When the user asks to modify the plan, emit a JSON array like:`,
+      `  COMMANDS=[{"op":"swap","a":{"day":1,"slot":"dinner"},"b":{"day":4,"slot":"lunch"}}]`,
+      `  Supported ops: swap | lock | optimize | fill-gaps`,
+      `  lock: {"op":"lock","day":2,"slot":"dinner","locked":true}`,
+      `  optimize: {"op":"optimize","target":"cost"|"time","delta":-10}`,
+      `  fill-gaps: {"op":"fill-gaps"}`,
+      `Then provide a short human summary.`,
+      `=====================`,
+    ].join("\n");
+  } catch {
+    return `=== PLAN SNAPSHOT ===\n<unavailable>\n=====================`;
+  }
+}
+
 /** =======================================================================
- *  Chef Chat (Ollama /api/chat) — prefs-injected system message
+ *  Chef Chat (Ollama /api/generate) — prefs + plan snapshot, COMMAND bridge
  *  ======================================================================= */
 export async function chatOllama(
   messages: ChatMessage[],
@@ -74,26 +101,41 @@ export async function chatOllama(
     throw new Error("No Ollama URL set in .env / app.config.js (EXPO_PUBLIC_LLAMA_URL).");
   }
 
-  // Ensure prefs are loaded and inject a system header if caller didn't provide one.
   await ensurePrefsLoaded();
   const prefs = getPrefs();
   const hasSystem = messages.some((m) => m.role === "system");
-  const finalMessages: ChatMessage[] = hasSystem
-    ? messages
-    : [{ role: "system", content: prefsHeader(prefs) }, ...messages];
+
+  const systemHeader = [
+    prefsHeader(prefs),
+    planHeader(), // <<< Day 5 addition
+  ].join("\n\n");
+
+  // We use /api/generate (prompt) to avoid streaming parse complexity.
+  const assembled = `
+<system>
+${hasSystem ? messages.find((m) => m.role === "system")?.content : systemHeader}
+</system>
+
+${messages
+  .filter((m) => m.role !== "system")
+  .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+  .join("\n")}
+ASSISTANT:
+`.trim();
 
   const body = {
     model: MODEL,
-    messages: finalMessages,
+    prompt: assembled,
     stream: options?.stream ?? false,
     options: {
-      temperature: options?.temperature ?? 0.7,
+      temperature: options?.temperature ?? 0.6,
       num_ctx: options?.num_ctx ?? 4096,
+      num_predict: 320,
     },
   };
 
   const res = await timeoutFetch(
-    `${OLLAMA_URL}/api/chat`,
+    `${OLLAMA_URL}/api/generate`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -108,11 +150,22 @@ export async function chatOllama(
   }
 
   const data = (await res.json()) as any;
-  const content = data?.message?.content;
-  if (typeof content !== "string") {
-    throw new Error("Unexpected chat response shape from Ollama.");
+  const content = typeof data?.response === "string" ? data.response : "";
+
+  // Try to auto-apply COMMANDS from the model output (Day 5 bridge)
+  const m = /COMMANDS\s*=\s*(\[[\s\S]*?\])/i.exec(content);
+  if (m) {
+    try {
+      const cmds = JSON.parse(m[1]) as PlanCommand[];
+      // Silent guard: validate basic structure before apply
+      const ok = Array.isArray(cmds) && cmds.every((c) => typeof c?.op === "string");
+      if (ok) usePlanStore.getState().applyCommands(cmds, "assistant");
+    } catch {
+      // ignore parse errors; user still gets the textual response
+    }
   }
-  return content;
+
+  return content || "I’m here. How do you want to update your plan?";
 }
 
 /** =======================================================================
@@ -145,7 +198,7 @@ Requirements:
 - Respect constraints strictly (no violations).
 - "minutes" must be a number.
 - Ingredient names should be concise nouns ("onion", "olive oil"), not brand names.
-`;
+`.trim();
 
   try {
     const res = await timeoutFetch(

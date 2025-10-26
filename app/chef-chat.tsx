@@ -23,15 +23,13 @@ import {
   ensurePrefsLoaded,
   getPrefs,
   updatePrefs,
-  resetPrefs,            // ⬅️ NEW
+  resetPrefs,
   useUpdatePrefs,
   type Prefs,
 } from '../lib/prefs';
 import { extractPrefsFromText, chipsForPrefs } from '../lib/prefsNLP';
 
 const STORAGE_KEY = 'nibble-chef-thread-v1';
-
-// Tweak this to tune the tiny visual gap between the composer and keyboard
 const FLOAT_GAP = 6; // dp
 
 function isPrefsEmpty() {
@@ -47,8 +45,8 @@ function uniq<T>(arr: T[]): T[] {
   return Array.from(new Set(arr));
 }
 
-// Merge two Partial<Prefs> patches with the rules:
-// - diet/religious: b overrides a if provided
+// Merge two Partial<Prefs> patches with rules:
+// - diet/religious/spice/units/zip: newest overrides
 // - allergens/dislikes: union + dedupe
 function mergePrefPatches(
   a: Partial<Prefs> | null | undefined,
@@ -58,14 +56,12 @@ function mergePrefPatches(
   const B = b ?? {};
   const merged: Partial<Prefs> = { ...A };
 
-  // Scalars: prefer newest if present
   if (B.diet) merged.diet = B.diet;
   if (B.religious) merged.religious = B.religious;
   if (B.preferredUnits) merged.preferredUnits = B.preferredUnits;
   if (typeof B.spiceTolerance !== 'undefined') merged.spiceTolerance = B.spiceTolerance;
   if (B.zip) merged.zip = B.zip;
 
-  // Arrays: union + dedupe
   const allergens = uniq([...(A.allergens ?? []), ...(B.allergens ?? [])]);
   if (allergens.length) merged.allergens = allergens;
 
@@ -76,7 +72,7 @@ function mergePrefPatches(
 }
 
 export default function ChefChatScreen() {
-  // Start without a system message — ai.ts injects a prefs-aware system header automatically.
+  // ai.ts injects the system header (prefs + plan). We only keep user/assistant history here.
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -86,72 +82,81 @@ export default function ChefChatScreen() {
 
   const insets = useSafeAreaInsets();
   const headerHeight = useHeaderHeight();
-  const updatePrefsHook = useUpdatePrefs(); // dev/demo shortcut remains
+  const updatePrefsHook = useUpdatePrefs(); // demo toggle
 
-  // Pending preference capture (inline Save/Not now) — now accumulative
+  // Pending preference capture (accumulative)
   const [pendingPrefs, setPendingPrefs] = useState<Partial<Prefs> | null>(null);
   const [pendingChips, setPendingChips] = useState<string[]>([]);
-  const [askedForPrefs, setAskedForPrefs] = useState(false);
+  const [bootstrapped, setBootstrapped] = useState(false);
 
-  // measure composer height (so we can lightly pad the list, avoiding overlap on very short screens)
+  // composer sizing for small screens
   const [composerH, setComposerH] = useState(56);
   const onComposerLayout = (e: LayoutChangeEvent) => {
     const h = Math.max(48, Math.round(e.nativeEvent.layout.height));
     if (h !== composerH) setComposerH(h);
   };
 
-  // Load prefs + saved thread on mount, then optionally ask for restrictions
+  // Bootstrap: load prefs + thread; if empty thread, inject intro + (prefs prompt | prefs summary)
   useEffect(() => {
     (async () => {
-      try {
-        await ensurePrefsLoaded();
-      } catch {}
+      try { await ensurePrefsLoaded(); } catch {}
+
+      let restored: ChatMessage[] = [];
       try {
         const raw = await AsyncStorage.getItem(STORAGE_KEY);
         if (raw) {
           const parsed = JSON.parse(raw) as ChatMessage[];
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            setMessages(parsed);
-          }
+          if (Array.isArray(parsed) && parsed.length > 0) restored = parsed;
         }
       } catch {}
+
+      if (restored.length === 0) {
+        const intro: ChatMessage = {
+          role: 'assistant',
+          content: "👨‍🍳 Hey, I’m Chef Nibble — your kitchen co-pilot. I can plan your week, swap meals, and optimize for time or budget.",
+        };
+
+        const empty = isPrefsEmpty();
+        if (empty) {
+          const ask: ChatMessage = {
+            role: 'assistant',
+            content:
+              "Before we start — do you have any dietary or religious restrictions I should follow (vegan, vegetarian, pescatarian, halal, kosher)? Any allergens or hard no’s (e.g., peanuts, dairy, cilantro)?",
+          };
+          setMessages([intro, ask]);
+        } else {
+          const chips = chipsForPrefs(getPrefs());
+          const note: ChatMessage = {
+            role: 'assistant',
+            content: chips.length
+              ? `I’ll follow your saved preferences: ${chips.join(' • ')}. Ask me to adjust the week or make swaps.`
+              : "I’ll follow your saved preferences. Ask me to adjust the week or make swaps.",
+          };
+          setMessages([intro, note]);
+        }
+      } else {
+        setMessages(restored);
+      }
+
+      setBootstrapped(true);
     })();
   }, []);
 
-  // On first render after prefs/thread load, prompt for restrictions if empty & not asked
+  // Persist thread + autoscroll
   useEffect(() => {
-    if (!askedForPrefs && messages.length === 0) {
-      const empty = isPrefsEmpty();
-      if (empty) {
-        setAskedForPrefs(true);
-        const assistantMsg: ChatMessage = {
-          role: 'assistant',
-          content:
-            "Before we start — do you have any dietary or religious restrictions I should follow (vegan, vegetarian, pescatarian, halal, kosher)? Any allergens or hard no’s (e.g., peanuts, dairy, cilantro)?",
-        };
-        setMessages([assistantMsg]);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages.length, askedForPrefs]);
-
-  // Persist on every change + auto scroll
-  useEffect(() => {
+    if (!bootstrapped) return;
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(messages)).catch(() => {});
     requestAnimationFrame(() => {
       listRef.current?.scrollToOffset({ offset: 9e6, animated: true });
     });
-  }, [messages]);
+  }, [messages, bootstrapped]);
 
+  // Detect prefs expressed in free text; stage them to confirm
   const handleDetectedPrefs = (text: string) => {
     const extracted = extractPrefsFromText(text);
     if (!extracted.found) return;
-
-    // Merge new detection into any existing pending prefs
     setPendingPrefs(prev => mergePrefPatches(prev, extracted.patch));
     setPendingChips(prev => uniq([...(prev ?? []), ...extracted.chips]));
-
-    // Non-blocking toast to indicate detection
     show('Detected preferences — review and Save above.');
   };
 
@@ -166,11 +171,11 @@ export default function ChefChatScreen() {
         ...prev,
         {
           role: 'assistant',
-          content: `Saved: ${chips.join(' • ')}. I’ll follow these rules going forward.`,
+          content: `Saved: ${chips.join(' • ')}. I’ll follow these rules going forward and the Planner will honor them on your next generation.`,
         },
       ]);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-    } catch (e) {
+    } catch {
       show('Failed to save preferences');
     }
   };
@@ -198,14 +203,10 @@ export default function ChefChatScreen() {
     setInput('');
     setMessages(prev => [...prev, userMsg]);
 
-    // Detect prefs expressed in natural language; offer Save/Not now banner (accumulative)
-    try {
-      handleDetectedPrefs(text);
-    } catch {
-      // ignore detection failures
-    }
+    // Stage prefs if the user mentioned any
+    try { handleDetectedPrefs(text); } catch {}
 
-    // Try deterministic Analytical Mode first
+    // Deterministic analytical reply first (math/ratios etc.)
     try {
       const analytic = analyticalReply(text);
       if (analytic) {
@@ -213,9 +214,7 @@ export default function ChefChatScreen() {
         setMessages(prev => [...prev, assistantMsg]);
         return;
       }
-    } catch {
-      // fall through to AI
-    }
+    } catch { /* fall through */ }
 
     setLoading(true);
     try {
@@ -237,7 +236,6 @@ export default function ChefChatScreen() {
     <KeyboardAvoidingView
       style={{ flex: 1, backgroundColor: '#0B0D0F' }}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      // Correct offset = native header height; avoids double-padding or clipping on iOS.
       keyboardVerticalOffset={Platform.OS === 'ios' ? headerHeight : 0}
     >
       <View style={{ flex: 1, paddingHorizontal: 12, paddingTop: 12 }}>
@@ -245,7 +243,7 @@ export default function ChefChatScreen() {
           Chef Nibble
         </Text>
 
-        {/* Status + Refresh + tiny Dev toggles */}
+        {/* Status + Refresh + Dev toggles */}
         <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
           <View
             style={{
@@ -264,7 +262,7 @@ export default function ChefChatScreen() {
             </Text>
           </TouchableOpacity>
 
-          {/* Dev-only: quick vegan toggle remains for demos */}
+          {/* Dev-only: quick vegan toggle */}
           <TouchableOpacity
             onPress={() => updatePrefsHook({ diet: 'vegan', allergens: ['dairy'] })}
             style={{ marginLeft: 10 }}
@@ -272,7 +270,7 @@ export default function ChefChatScreen() {
             <Text style={{ color: '#10b981', fontWeight: '600' }}>Dev: Vegan</Text>
           </TouchableOpacity>
 
-          {/* NEW: Dev Reset to defaults */}
+          {/* Dev: reset */}
           <TouchableOpacity
             onPress={async () => {
               await resetPrefs();
@@ -341,9 +339,7 @@ export default function ChefChatScreen() {
           keyExtractor={(_, i) => String(i)}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ paddingBottom: 8 }}
-          onContentSizeChange={() =>
-            listRef.current?.scrollToOffset({ offset: 9e6, animated: true })
-          }
+          onContentSizeChange={() => listRef.current?.scrollToOffset({ offset: 9e6, animated: true })}
           renderItem={({ item }) => (
             <View
               style={{
@@ -362,7 +358,7 @@ export default function ChefChatScreen() {
           ListFooterComponent={loading ? <ActivityIndicator /> : null}
         />
 
-        {/* Floating composer with a minimal gap above the keyboard */}
+        {/* Composer */}
         <View
           onLayout={onComposerLayout}
           style={{
@@ -382,7 +378,7 @@ export default function ChefChatScreen() {
               paddingHorizontal: 12,
               paddingVertical: 10,
             }}
-            placeholder="Ask the chef..."
+            placeholder="Tell me about yourself or ask for a meal plan…"
             placeholderTextColor="#777"
             value={input}
             onChangeText={setInput}
@@ -410,4 +406,5 @@ export default function ChefChatScreen() {
     </KeyboardAvoidingView>
   );
 }
+
 

@@ -1,196 +1,272 @@
 // lib/planStore.ts
-// Shared, AsyncStorage-backed store for the weekly plan.
-// Deterministic actions; UI reads via hook. Chef Chat will call the same actions.
-
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useSyncExternalStore } from 'react';
-import { getPrefs, type Prefs } from './prefs';
-import { pickWeek, rescoreWeek, type PlanRecipe, type PlanConstraints, type ScoreWeights, type WeekResult, type TimeWindow } from './scorePlan';
+import { create } from 'zustand';
+import { nanoid } from 'nanoid/non-secure';
 
-const STORAGE_KEY = 'nibble-plan-v1';
+export type MealSlot = 'breakfast' | 'lunch' | 'dinner' | 'snack' | 'dessert';
 
-// -------- Types --------
-
-export type PlanMeta = {
-  tradeoffWeight: number;       // 0 = fastest, 1 = cheapest
-  budgetCapUSD?: number | null; // optional weekly cap
-  zip?: string | null;
-  updatedAt: number;            // epoch ms
-  dayWindows?: Record<number, TimeWindow>;
+export type Meal = {
+  id: string;
+  name: string;
+  slot: MealSlot;
+  recipeId?: string;
+  ingredients: { name: string; qty?: string; unit?: string }[];
+  tags: string[];
+  timeMins: number;
+  costUSD: number;
+  nutrition?: { kcal?: number; protein?: number; carbs?: number; fat?: number };
+  source: 'deterministic' | 'ai';
+  locked?: boolean;
 };
 
-export type PlanState = {
-  candidates: PlanRecipe[];     // source pool used to build week
-  week: PlanRecipe[];           // selected 7 recipes
-  meta: PlanMeta;
+export type DayPlan = {
+  dateISO: string;
+  slots: Record<MealSlot, Meal | null>;
 };
 
-const DEFAULT_META: PlanMeta = {
-  tradeoffWeight: 0.5,
-  budgetCapUSD: null,
-  zip: null,
-  updatedAt: 0,
-  dayWindows: {},
+export type DiversityReport = {
+  protein: Record<string, number>;
+  cuisine: Record<string, number>;
+  repeats: { reason: 'protein' | 'cuisine'; day: number; slot: MealSlot; offending: string }[];
 };
 
-let state: PlanState = {
-  candidates: [],
-  week: [],
-  meta: { ...DEFAULT_META },
+export type WeekPlan = {
+  weekId: string;           // YYYY-WW
+  days: DayPlan[];
+  budgetUSD?: number;
+  timeVsMoney: number;      // 0..100
+  updatedAt: string;
+  version: number;
 };
 
-const subs = new Set<() => void>();
-function emit() { subs.forEach(fn => fn()); }
+export type PlanChange = { ts: string; summary: string; commands: PlanCommand[]; actor: 'user'|'assistant' };
 
-// -------- Persistence --------
+export type PlanCommand =
+ | { op: 'swap', a: { day: number; slot: MealSlot }, b: { day: number; slot: MealSlot } }
+ | { op: 'replace', day: number; slot: MealSlot, meal: Meal } // fully specified Meal from deterministic/AI proposer
+ | { op: 'lock', day: number; slot: MealSlot, locked: boolean }
+ | { op: 'optimize', target: 'cost' | 'time', delta: number }   // +/- dollars or minutes
+ | { op: 'fill-gaps' };
 
-async function save() {
-  try { await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
-}
-export async function loadPlan(): Promise<void> {
-  try {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') {
-      state = {
-        candidates: Array.isArray(parsed.candidates) ? parsed.candidates : [],
-        week: Array.isArray(parsed.week) ? parsed.week : [],
-        meta: { ...DEFAULT_META, ...(parsed.meta ?? {}) },
-      };
-    }
-  } catch {}
-}
+type State = {
+  week: WeekPlan | null;
+  changes: PlanChange[];
+  getWeek: () => WeekPlan | null;
+  setWeek: (w: WeekPlan) => void;
+  patch: (fn: (w: WeekPlan) => WeekPlan) => void;
+  swap: (dayA: number, slotA: MealSlot, dayB: number, slotB: MealSlot) => void;
+  replace: (day: number, slot: MealSlot, meal: Meal) => void;
+  lock: (day: number, slot: MealSlot, locked: boolean) => void;
+  optimize: (target: 'cost'|'time', delta: number) => void;
+  fillGaps: () => void;
+  stats: () => { totalCost: number; avgTime: number; diversity: DiversityReport; lockedCount: number };
+  persist: () => Promise<void>;
+  load: (weekId?: string) => Promise<void>;
+  applyCommands: (cmds: PlanCommand[], actor: 'user'|'assistant') => void;
+};
 
-// -------- Validation (guardrails) --------
+const STORAGE_KEY_LATEST = 'nibble.week.latest';
 
-function forbiddenTermsFromPrefs(p: Prefs): string[] {
-  const forbid = new Set<string>();
-
-  // Allergens/dislikes direct tokens
-  for (const a of (p.allergens ?? [])) forbid.add(a.toLowerCase());
-  for (const d of (p.dislikes ?? [])) forbid.add(d.toLowerCase());
-
-  // Religious basics
-  if (p.religious === 'halal') {
-    ['pork','bacon','ham','prosciutto','pepperoni','alcohol','wine','beer','rum','gin'].forEach(t => forbid.add(t));
-  }
-  if (p.religious === 'kosher') {
-    ['pork','bacon','ham','shellfish','shrimp','lobster','crab'].forEach(t => forbid.add(t));
-  }
-
-  // Diet shortcuts
-  if (p.diet === 'vegan') {
-    ['meat','chicken','beef','pork','fish','egg','eggs','cheese','milk','butter','honey','yogurt'].forEach(t => forbid.add(t));
-  }
-  if (p.diet === 'vegetarian') {
-    ['meat','chicken','beef','pork','fish','shellfish','shrimp','lobster','crab'].forEach(t => forbid.add(t));
-  }
-  if (p.diet === 'pescatarian') {
-    ['meat','chicken','beef','pork'].forEach(t => forbid.add(t));
-  }
-
-  return Array.from(forbid);
+function isoWeekId(d = new Date()): string {
+  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = (date.getUTCDay() + 6) % 7; // Monday=0
+  date.setUTCDate(date.getUTCDate() - dayNum + 3);
+  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(),0,4));
+  const week = 1 + Math.round(((+date - +firstThursday)/86400000 - 3 + ((firstThursday.getUTCDay()+6)%7))/7);
+  return `${date.getUTCFullYear()}-W${String(week).padStart(2,'0')}`;
 }
 
-function buildConstraints(p: Prefs, meta: PlanMeta, pantryItems: string[] = []): PlanConstraints {
+function emptyDay(dateISO: string): DayPlan {
+  const slots: Record<MealSlot, Meal | null> = {
+    breakfast: null, lunch: null, dinner: null, snack: null, dessert: null
+  };
+  return { dateISO, slots };
+}
+
+function defaultWeek(): WeekPlan {
+  const start = new Date();
+  const days: DayPlan[] = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(start);
+    d.setDate(d.getDate() + i);
+    return emptyDay(d.toISOString().slice(0,10));
+  });
   return {
-    budgetCapUSD: meta.budgetCapUSD ?? null,
-    dayWindows: meta.dayWindows ?? {},
-    pantryItems,
-    forbidTerms: forbiddenTermsFromPrefs(p),
+    weekId: isoWeekId(start),
+    days,
+    budgetUSD: 70,
+    timeVsMoney: 50,
+    updatedAt: new Date().toISOString(),
+    version: 1,
   };
 }
 
-function weightsFromMeta(meta: PlanMeta): ScoreWeights {
-  const wc = Math.max(0, Math.min(1, meta.tradeoffWeight ?? 0.5));
-  return {
-    weightCost: wc,
-    weightTime: 1 - wc,
-    reuseBonus: 0.12,          // tune later
-    varietyPenalty: 0.18,      // tune later
-    overBudgetPenalty: 0.6,    // $1 over → 0.6 penalty
-    windowPenalty: 0.4,        // time-window mismatch penalty
-  };
+async function saveWeek(w: WeekPlan) {
+  await AsyncStorage.setItem(`nibble.week.${w.weekId}`, JSON.stringify(w));
+  await AsyncStorage.setItem(STORAGE_KEY_LATEST, w.weekId);
 }
 
-// -------- Public API (actions) --------
-
-export function getPlanState(): PlanState { return state; }
-
-export async function setCandidates(pool: PlanRecipe[]): Promise<void> {
-  state.candidates = pool ?? [];
-  await save(); emit();
-}
-
-export async function setTradeoffWeight(w: number): Promise<void> {
-  state.meta.tradeoffWeight = Math.max(0, Math.min(1, w));
-  state.meta.updatedAt = Date.now();
-  await save(); emit();
-}
-
-export async function setBudgetCapUSD(cap: number | null): Promise<void> {
-  state.meta.budgetCapUSD = (cap == null || isNaN(cap)) ? null : Math.max(0, cap);
-  state.meta.updatedAt = Date.now();
-  await save(); emit();
-}
-
-export async function setDayWindow(index: number, w: TimeWindow): Promise<void> {
-  state.meta.dayWindows = { ...(state.meta.dayWindows ?? {}), [index]: w };
-  state.meta.updatedAt = Date.now();
-  await save(); emit();
-}
-
-export async function generateWeek(pantryItems: string[] = []): Promise<WeekResult> {
-  const prefs = getPrefs();
-  const constraints = buildConstraints(prefs, state.meta, pantryItems);
-  const weights = weightsFromMeta(state.meta);
-
-  const result = pickWeek(state.candidates, weights, constraints);
-  state.week = result.days.map(d => d.recipe);
-  state.meta.updatedAt = Date.now();
-
-  await save(); emit();
-  return result;
-}
-
-export async function rescoreCurrentWeek(pantryItems: string[] = []): Promise<WeekResult> {
-  if (state.week.length !== 7) {
-    // If we don't have a full week yet, just (re)generate from pool
-    return generateWeek(pantryItems);
+async function loadWeek(weekId?: string): Promise<WeekPlan> {
+  let id = weekId;
+  if (!id) id = await AsyncStorage.getItem(STORAGE_KEY_LATEST) ?? undefined;
+  if (id) {
+    const raw = await AsyncStorage.getItem(`nibble.week.${id}`);
+    if (raw) return JSON.parse(raw);
   }
-  const prefs = getPrefs();
-  const constraints = buildConstraints(prefs, state.meta, pantryItems);
-  const weights = weightsFromMeta(state.meta);
-
-  const result = rescoreWeek(state.week, weights, constraints);
-  state.meta.updatedAt = Date.now();
-
-  await save(); emit();
-  return result;
+  const w = defaultWeek();
+  await saveWeek(w);
+  return w;
 }
 
-export async function replaceDay(index: number, recipe: PlanRecipe): Promise<void> {
-  if (index < 0 || index > 6) return;
-  state.week[index] = recipe;
-  state.meta.updatedAt = Date.now();
-  await save(); emit();
+function diversityReport(week: WeekPlan): DiversityReport {
+  const protein: Record<string, number> = {};
+  const cuisine: Record<string, number> = {};
+  const repeats: DiversityReport['repeats'] = [];
+  week.days.forEach((d, di) => {
+    (Object.keys(d.slots) as MealSlot[]).forEach(slot => {
+      const m = d.slots[slot];
+      if (!m) return;
+      const p = (m.tags.find(t => t.startsWith('protein:')) ?? 'protein:unknown').split(':')[1];
+      const c = (m.tags.find(t => t.startsWith('cuisine:')) ?? 'cuisine:unknown').split(':')[1];
+      protein[p] = (protein[p] ?? 0) + 1;
+      cuisine[c] = (cuisine[c] ?? 0) + 1;
+      if (protein[p] > 2) repeats.push({ reason: 'protein', day: di, slot, offending: p });
+      if (cuisine[c] > 2) repeats.push({ reason: 'cuisine', day: di, slot, offending: c });
+    });
+  });
+  return { protein, cuisine, repeats };
 }
 
-export async function swapDays(a: number, b: number): Promise<void> {
-  if (a < 0 || a > 6 || b < 0 || b > 6) return;
-  const tmp = state.week[a];
-  state.week[a] = state.week[b];
-  state.week[b] = tmp;
-  state.meta.updatedAt = Date.now();
-  await save(); emit();
-}
+export const usePlanStore = create<State>((set, get) => ({
+  week: null,
+  changes: [],
+  getWeek: () => get().week,
+  setWeek: (w) => { set({ week: w }); get().persist(); },
+  patch: (fn) => {
+    const w = get().week ?? defaultWeek();
+    const next = fn({ ...w, updatedAt: new Date().toISOString() });
+    set({ week: next });
+    get().persist();
+  },
+  swap: (dayA, slotA, dayB, slotB) => {
+    get().patch(w => {
+      const a = w.days[dayA].slots[slotA];
+      const b = w.days[dayB].slots[slotB];
+      if (a?.locked || b?.locked) return w;
+      const ww = structuredClone(w);
+      ww.days[dayA].slots[slotA] = b;
+      ww.days[dayB].slots[slotB] = a;
+      return ww;
+    });
+  },
+  replace: (day, slot, meal) => {
+    get().patch(w => {
+      const current = w.days[day].slots[slot];
+      if (current?.locked) return w;
+      const ww = structuredClone(w);
+      ww.days[day].slots[slot] = { ...meal, id: meal.id || nanoid(), slot };
+      return ww;
+    });
+  },
+  lock: (day, slot, locked) => {
+    get().patch(w => {
+      const ww = structuredClone(w);
+      const m = ww.days[day].slots[slot];
+      if (m) m.locked = locked;
+      return ww;
+    });
+  },
+  optimize: (target, delta) => {
+    // Deterministic placeholder: apply proportional tweaks to unlocked meals.
+    get().patch(w => {
+      const ww = structuredClone(w);
+      const flat: Meal[] = [];
+      ww.days.forEach(d => (Object.values(d.slots).forEach(m => m && !m.locked && flat.push(m))));
+      if (flat.length === 0) return ww;
+      if (target === 'cost') {
+        const per = delta / flat.length;
+        flat.forEach(m => m.costUSD = Math.max(0, m.costUSD + per));
+      } else {
+        const per = Math.round(delta / flat.length);
+        flat.forEach(m => m.timeMins = Math.max(1, m.timeMins + per));
+      }
+      return ww;
+    });
+  },
+  fillGaps: () => {
+    get().patch(w => {
+      const ww = structuredClone(w);
+      ww.days.forEach(d => {
+        (Object.keys(d.slots) as MealSlot[]).forEach(slot => {
+          if (!d.slots[slot]) {
+            d.slots[slot] = {
+              id: nanoid(),
+              name: slot === 'breakfast' ? 'Oatmeal & Fruit' : 'Pasta Pomodoro',
+              slot,
+              ingredients: [],
+              tags: ['protein:veg', 'cuisine:generic'],
+              timeMins: slot === 'breakfast' ? 6 : 18,
+              costUSD: slot === 'breakfast' ? 1.2 : 3.8,
+              source: 'deterministic',
+            };
+          }
+        });
+      });
+      return ww;
+    });
+  },
+  stats: () => {
+    const w = get().week ?? defaultWeek();
+    let totalCost = 0, totalTime = 0, count = 0, lockedCount = 0;
+    w.days.forEach(d => (Object.values(d.slots).forEach(m => {
+      if (!m) return;
+      totalCost += m.costUSD;
+      totalTime += m.timeMins;
+      count += 1;
+      if (m.locked) lockedCount += 1;
+    })));
+    const diversity = diversityReport(w);
+    return { totalCost, avgTime: count ? totalTime / count : 0, diversity, lockedCount };
+  },
+  persist: async () => {
+    const w = get().week;
+    if (w) await saveWeek(w);
+  },
+  load: async (weekId?: string) => {
+    const w = await loadWeek(weekId);
+    set({ week: w });
+  },
+  applyCommands: (cmds, actor) => {
+    const start = Date.now();
+    cmds.forEach(c => {
+      if (c.op === 'swap') get().swap(c.a.day, c.a.slot, c.b.day, c.b.slot);
+      else if (c.op === 'replace') get().replace(c.day, c.slot, c.meal);
+      else if (c.op === 'lock') get().lock(c.day, c.slot, c.locked);
+      else if (c.op === 'optimize') get().optimize(c.target, c.delta);
+      else if (c.op === 'fill-gaps') get().fillGaps();
+    });
+    const summary = cmds.map(c => c.op).join(', ');
+    set(s => ({ changes: [...s.changes, { ts: new Date().toISOString(), summary, commands: cmds, actor }] }));
+    console.log('[plan.apply]', { ms: Date.now() - start, summary });
+  },
+}));
 
-// -------- Hook --------
-
-export function usePlan(): PlanState {
-  const subscribe = (cb: () => void) => { subs.add(cb); return () => subs.delete(cb); };
-  const getSnapshot = () => state;
-  // SSR fallback same as client since this is client-only
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+// Helper for AI system prompts — compact snapshot of the week
+export function planCapsule(): string {
+  const w = usePlanStore.getState().getWeek();
+  if (!w) return 'WEEK: <none>';
+  const locks: string[] = [];
+  w.days.forEach((d, di) => (Object.entries(d.slots).forEach(([slot, m]) => {
+    if (m?.locked) locks.push(`(${di}:${slot})`);
+  })));
+  const { totalCost, avgTime, diversity } = usePlanStore.getState().stats();
+  const gaps: string[] = [];
+  w.days.forEach((d, di) => (Object.entries(d.slots).forEach(([slot, m]) => { if (!m) gaps.push(`${di}:${slot}`); })));
+  return [
+    `WEEK ${w.weekId}`,
+    `BUDGET $${w.budgetUSD ?? 'n/a'} | SLIDER ${w.timeVsMoney}/100`,
+    `COST ~$${totalCost.toFixed(2)} | AVG TIME ${avgTime.toFixed(1)}m`,
+    `LOCKS [${locks.join(', ')}]`,
+    `DIVERSITY protein=${JSON.stringify(diversity.protein)} cuisine=${JSON.stringify(diversity.cuisine)}`,
+    `GAPS [${gaps.join(', ')}]`,
+  ].join('\n');
 }
